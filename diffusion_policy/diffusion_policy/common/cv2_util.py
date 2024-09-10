@@ -3,7 +3,6 @@ import math
 import cv2
 import numpy as np
 
-
 def draw_reticle(img, u, v, label_color):
     """
     Draws a reticle (cross-hair) on the image at the given position on top of
@@ -83,16 +82,16 @@ def draw_text(
 
 
 def get_image_transform(
-    input_res: Tuple[int, int] = (1280, 720),
-    output_res: Tuple[int, int] = (640, 480),
-    bgr_to_rgb: bool = False,
-):
+        input_res: Tuple[int,int]=(1280,720), 
+        output_res: Tuple[int,int]=(640,480), 
+        bgr_to_rgb: bool=False):
+
     iw, ih = input_res
     ow, oh = output_res
     rw, rh = None, None
     interp_method = cv2.INTER_AREA
 
-    if (iw / ih) >= (ow / oh):
+    if (iw/ih) >= (ow/oh):
         # input is wider
         rh = oh
         rw = math.ceil(rh / ih * iw)
@@ -103,7 +102,7 @@ def get_image_transform(
         rh = math.ceil(rw / iw * ih)
         if ow > iw:
             interp_method = cv2.INTER_LINEAR
-
+    
     w_slice_start = (rw - ow) // 2
     w_slice = slice(w_slice_start, w_slice_start + ow)
     h_slice_start = (rh - oh) // 2
@@ -113,21 +112,23 @@ def get_image_transform(
         c_slice = slice(None, None, -1)
 
     def transform(img: np.ndarray):
-        assert img.shape == ((ih, iw, 3))
+        assert img.shape == ((ih,iw,3))
         # resize
         img = cv2.resize(img, (rw, rh), interpolation=interp_method)
         # crop
         img = img[h_slice, w_slice, c_slice]
         return img
-
     return transform
 
-
-def optimal_row_cols(n_cameras, in_wh_ratio, max_resolution=(1920, 1080)):
+def optimal_row_cols(
+        n_cameras,
+        in_wh_ratio,
+        max_resolution=(1920, 1080)
+    ):
     out_w, out_h = max_resolution
     out_wh_ratio = out_w / out_h
-
-    n_rows = np.arange(n_cameras, dtype=np.int64) + 1
+    
+    n_rows = np.arange(n_cameras,dtype=np.int64) + 1
     n_cols = np.ceil(n_cameras / n_rows).astype(np.int64)
     cat_wh_ratio = in_wh_ratio * (n_cols / n_rows)
     ratio_diff = np.abs(out_wh_ratio - cat_wh_ratio)
@@ -144,6 +145,6 @@ def optimal_row_cols(n_cameras, in_wh_ratio, max_resolution=(1920, 1080)):
     else:
         rh = math.floor(out_h / best_n_row)
         rw = math.floor(rh * in_wh_ratio)
-
+    
     # crop_resolution = (rw, rh)
     return rw, rh, best_n_col, best_n_row

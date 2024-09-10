@@ -72,6 +72,7 @@ class Trainer:
                 else enumerate(loader)
             )
             for it, (x, y) in pbar:
+
                 # place data on the correct device
                 x = x.to(self.device)
                 y = y.to(self.device)
@@ -85,6 +86,7 @@ class Trainer:
                     losses.append(loss.item())
 
                 if is_train:
+
                     # backprop and update the parameters
                     model.zero_grad()
                     loss.backward()

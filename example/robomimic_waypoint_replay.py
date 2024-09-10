@@ -69,6 +69,15 @@ def main(args):
     num_waypoints = []
     num_frames = []
     traj_err_list = []
+    if args.plot_3d:
+            fig = plt.figure(figsize=(10, 10))
+            ax = fig.add_subplot(111, projection="3d")
+            ax.set_xlabel("x")
+            ax.set_ylabel("y")
+            ax.set_zlabel("z")
+            
+    obj_init_flag = True
+    n = -1
     for idx in range(args.start_idx, args.end_idx + 1):
         ep = demos[idx]
         print(f"Playing back episode: {ep}")
@@ -175,6 +184,7 @@ def main(args):
 
         # recreate the trajectory by following waypoints
         start_time = time.time()
+        """
         pred_states_list, _, traj_err = reconstruct_waypoint_trajectory(
             env=env,
             actions=actions,
@@ -185,13 +195,14 @@ def main(args):
             initial_state=initial_states[0],
             remove_obj=args.remove_object,
         )
+        """
         total_time = time.time() - start_time
         print(f"Simulation took {total_time:.2f} seconds")
 
         num_waypoint = len(waypoints)
         print(f"Number of waypoints: {num_waypoint}")
         num_waypoints.append(num_waypoint)
-        traj_err_list.append(traj_err)
+        # traj_err_list.append(traj_err)
         num_frames.append(len(actions))
 
         if args.wandb:
@@ -210,31 +221,50 @@ def main(args):
 
         # record a 3D visualization
         if args.plot_3d:
+            """
             fig = plt.figure(figsize=(10, 10))
             ax = fig.add_subplot(111, projection="3d")
             ax.set_xlabel("x")
             ax.set_ylabel("y")
             ax.set_zlabel("z")
             ax.set_title(f"Task: {args.task}, Data idx: {idx}")
-
-            plot_3d_trajectory(
+            """
+            gripper_open = (actions[:,-1]+1).nonzero()
+            obj_pos = gt_states[gripper_open[0][0]]["robot0_eef_pos"]
+            obj_final_pos =  gt_states[gripper_open[0][-1]]["robot0_eef_pos"]
+            if obj_init_flag:
+                print('init obs pos:',obj_pos)
+                obj_init_pos= obj_pos
+                obj_1_final_pos = obj_final_pos
+                obj_init_flag = False
+            if np.linalg.norm(obj_pos[:2]-obj_init_pos[:2]) < 0.03 and np.linalg.norm(obj_final_pos-obj_1_final_pos) < 0.03: 
+                print('obj pos:',obj_pos)
+                plot_3d_trajectory(
                 ax,
                 [s["robot0_eef_pos"] for s in gt_states],
                 label="gt",
                 gripper=actions[:, -1],
-            )
+                )
+                n += 1
+            """
             plot_3d_trajectory(
-                ax, pred_states_list, label="pred", gripper=actions[:, -1]
+                ax, pred_states_list, label=f"pred{idx}", gripper=actions[:, -1]
             )
+            """
             # plot_3d_trajectory(ax, actions[1:, :3], label="action", gripper=actions[:, -1])
 
-            fig.savefig(video_path.replace(".mp4", ".png"))
-            if args.wandb:
-                wandb.log({"3d_traj": wandb.Image(fig)}, step=idx)
-            plt.close(fig)
+            
 
         if args.record_video:
             video_writer.close()
+    ax.set_title(f"Task: {args.task} Data: {n}")
+    ax.view_init(elev=45, azim=45)
+    fig.savefig(video_path.replace(".mp4", f"elev_{45}_azim_{45}.png"))
+    ax.view_init(elev=45, azim=180)
+    fig.savefig(video_path.replace(".mp4", f"elev_{0}_azim_{180}.png"))
+    if args.wandb:
+        wandb.log({"3d_traj": wandb.Image(fig)}, step=idx)
+    plt.close(fig)
 
     if args.wandb:
         wandb.log({"avg_num_waypoints": np.mean(num_waypoints)})
@@ -278,7 +308,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--end_idx",
         type=int,
-        default=2,
+        default=199,
         help="(optional) end index of the trajectory to playback",
     )
 

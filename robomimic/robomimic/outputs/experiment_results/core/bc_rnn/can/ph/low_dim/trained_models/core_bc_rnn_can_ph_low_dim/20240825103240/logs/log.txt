@@ -1,0 +1,23 @@
+
+============= Initialized Observation Utils with Obs Spec =============
+
+using obs modality: low_dim with keys: ['object', 'robot0_gripper_qpos', 'robot0_eef_pos', 'robot0_eef_quat']
+using obs modality: rgb with keys: []
+using obs modality: depth with keys: []
+using obs modality: scan with keys: []
+
+============= Loaded Environment Metadata =============
+run failed with error:
+This config has been locked and 'env' is not in this config
+
+Traceback (most recent call last):
+  File "/home/lingxiao/miniconda3/awe/robomimic/robomimic/scripts/train.py", line 458, in main
+    train(config, device=device)
+  File "/home/lingxiao/miniconda3/awe/robomimic/robomimic/scripts/train.py", line 80, in train
+    if config.env is not None:
+  File "/home/lingxiao/miniconda3/awe/robomimic/robomimic/config/config.py", line 236, in __getattr__
+    return self.__getitem__(item)
+  File "/home/lingxiao/miniconda3/awe/robomimic/robomimic/config/config.py", line 247, in __getitem__
+    raise RuntimeError(
+RuntimeError: This config has been locked and 'env' is not in this config
+

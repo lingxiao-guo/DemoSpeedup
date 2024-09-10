@@ -178,15 +178,33 @@ def plot_3d_trajectory(ax, traj_list, label, gripper=None, legend=True, add=None
                 markersize=10,
             )
         else:
-            ax.plot(
+            if i > 0:
+                v = traj_list[i] - traj_list[i - 1]
+                ax.quiver(
+                traj_list[i - 1][0],
+                traj_list[i - 1][1],
+                traj_list[i - 1][2],
+                v[0],
+                v[1],
+                v[2],
+                color=c,
+                alpha=0.5,
+                # linewidth=3,
+            )
+            if gripper_state_changed:
+                if gripper[i] == 1:  # open
+                   marker = "D"
+                else:  # close
+                   marker = "s"
+                ax.plot(
                 [traj_list[i][0]],
                 [traj_list[i][1]],
                 [traj_list[i][2]],
                 marker=marker,
                 label=l,
                 color=c,
-                # markersize=10,
-            )
+                markersize=5,
+                )
         l = None
 
     if legend:

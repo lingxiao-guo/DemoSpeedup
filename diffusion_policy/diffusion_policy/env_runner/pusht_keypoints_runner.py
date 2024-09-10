@@ -6,52 +6,47 @@ import pathlib
 import tqdm
 import dill
 import math
+import matplotlib.pyplot as plt
 import wandb.sdk.data_types.video as wv
 from diffusion_policy.env.pusht.pusht_keypoints_env import PushTKeypointsEnv
 from diffusion_policy.gym_util.async_vector_env import AsyncVectorEnv
-
 # from diffusion_policy.gym_util.sync_vector_env import SyncVectorEnv
 from diffusion_policy.gym_util.multistep_wrapper import MultiStepWrapper
-from diffusion_policy.gym_util.video_recording_wrapper import (
-    VideoRecordingWrapper,
-    VideoRecorder,
-)
+from diffusion_policy.gym_util.video_recording_wrapper import VideoRecordingWrapper, VideoRecorder
 
 from diffusion_policy.policy.base_lowdim_policy import BaseLowdimPolicy
 from diffusion_policy.common.pytorch_util import dict_apply
 from diffusion_policy.env_runner.base_lowdim_runner import BaseLowdimRunner
 
-
 class PushTKeypointsRunner(BaseLowdimRunner):
-    def __init__(
-        self,
-        output_dir,
-        keypoint_visible_rate=1.0,
-        n_train=10,
-        n_train_vis=3,
-        train_start_seed=0,
-        n_test=22,
-        n_test_vis=6,
-        legacy_test=False,
-        test_start_seed=10000,
-        max_steps=200,
-        n_obs_steps=8,
-        n_action_steps=8,
-        n_latency_steps=0,
-        fps=10,
-        crf=22,
-        agent_keypoints=False,
-        past_action=False,
-        tqdm_interval_sec=5.0,
-        n_envs=None,
-    ):
+    def __init__(self,
+            output_dir,
+            keypoint_visible_rate=1.0,
+            n_train=10,
+            n_train_vis=3,
+            train_start_seed=0,
+            n_test=22,
+            n_test_vis=6,
+            legacy_test=False,
+            test_start_seed=10000,
+            max_steps=200,
+            n_obs_steps=8,
+            n_action_steps=8,
+            n_latency_steps=0,
+            fps=10,
+            crf=22,
+            agent_keypoints=False,
+            past_action=False,
+            tqdm_interval_sec=5.0,
+            n_envs=None
+        ):
         super().__init__(output_dir)
 
         if n_envs is None:
             n_envs = n_train + n_test
 
         # handle latency step
-        # to mimic latency, we request n_latency_steps additional steps
+        # to mimic latency, we request n_latency_steps additional steps 
         # of past observations, and the discard the last n_latency_steps
         env_n_obs_steps = n_obs_steps + n_latency_steps
         env_n_action_steps = n_action_steps
@@ -66,23 +61,23 @@ class PushTKeypointsRunner(BaseLowdimRunner):
                         legacy=legacy_test,
                         keypoint_visible_rate=keypoint_visible_rate,
                         agent_keypoints=agent_keypoints,
-                        **kp_kwargs,
+                        **kp_kwargs
                     ),
                     video_recoder=VideoRecorder.create_h264(
                         fps=fps,
-                        codec="h264",
-                        input_pix_fmt="rgb24",
+                        codec='h264',
+                        input_pix_fmt='rgb24',
                         crf=crf,
-                        thread_type="FRAME",
-                        thread_count=1,
+                        thread_type='FRAME',
+                        thread_count=1
                     ),
                     file_path=None,
                 ),
                 n_obs_steps=env_n_obs_steps,
                 n_action_steps=env_n_action_steps,
-                max_episode_steps=max_steps,
+                max_episode_steps=max_steps
             )
-
+        # print(env_fn.statelist)
         env_fns = [env_fn] * n_envs
         env_seeds = list()
         env_prefixs = list()
@@ -100,8 +95,7 @@ class PushTKeypointsRunner(BaseLowdimRunner):
                 env.env.file_path = None
                 if enable_render:
                     filename = pathlib.Path(output_dir).joinpath(
-                        "media", wv.util.generate_id() + ".mp4"
-                    )
+                        'media', wv.util.generate_id() + ".mp4")
                     filename.parent.mkdir(parents=False, exist_ok=True)
                     filename = str(filename)
                     env.env.file_path = filename
@@ -109,9 +103,9 @@ class PushTKeypointsRunner(BaseLowdimRunner):
                 # set seed
                 assert isinstance(env, MultiStepWrapper)
                 env.seed(seed)
-
+            
             env_seeds.append(seed)
-            env_prefixs.append("train/")
+            env_prefixs.append('train/')
             env_init_fn_dills.append(dill.dumps(init_fn))
 
         # test
@@ -127,8 +121,7 @@ class PushTKeypointsRunner(BaseLowdimRunner):
                 env.env.file_path = None
                 if enable_render:
                     filename = pathlib.Path(output_dir).joinpath(
-                        "media", wv.util.generate_id() + ".mp4"
-                    )
+                        'media', wv.util.generate_id() + ".mp4")
                     filename.parent.mkdir(parents=False, exist_ok=True)
                     filename = str(filename)
                     env.env.file_path = filename
@@ -138,7 +131,7 @@ class PushTKeypointsRunner(BaseLowdimRunner):
                 env.seed(seed)
 
             env_seeds.append(seed)
-            env_prefixs.append("test/")
+            env_prefixs.append('test/')
             env_init_fn_dills.append(dill.dumps(init_fn))
 
         env = AsyncVectorEnv(env_fns)
@@ -163,7 +156,9 @@ class PushTKeypointsRunner(BaseLowdimRunner):
         self.past_action = past_action
         self.max_steps = max_steps
         self.tqdm_interval_sec = tqdm_interval_sec
+        self.action_variance = []
 
+    
     def run(self, policy: BaseLowdimPolicy):
         device = policy.device
         dtype = policy.dtype
@@ -184,63 +179,78 @@ class PushTKeypointsRunner(BaseLowdimRunner):
             end = min(n_inits, start + n_envs)
             this_global_slice = slice(start, end)
             this_n_active_envs = end - start
-            this_local_slice = slice(0, this_n_active_envs)
-
+            this_local_slice = slice(0,this_n_active_envs)
+            
             this_init_fns = self.env_init_fn_dills[this_global_slice]
             n_diff = n_envs - len(this_init_fns)
             if n_diff > 0:
-                this_init_fns.extend([self.env_init_fn_dills[0]] * n_diff)
+                this_init_fns.extend([self.env_init_fn_dills[0]]*n_diff)
             assert len(this_init_fns) == n_envs
 
             # init envs
-            env.call_each("run_dill_function", args_list=[(x,) for x in this_init_fns])
+            env.call_each('run_dill_function', 
+                args_list=[(x,) for x in this_init_fns])
 
             # start rollout
             obs = env.reset()
             past_action = None
             policy.reset()
 
-            pbar = tqdm.tqdm(
-                total=self.max_steps,
-                desc=f"Eval PushtKeypointsRunner {chunk_idx+1}/{n_chunks}",
-                leave=False,
-                mininterval=self.tqdm_interval_sec,
-            )
+            pbar = tqdm.tqdm(total=self.max_steps, desc=f"Eval PushtKeypointsRunner {chunk_idx+1}/{n_chunks}", 
+                leave=False, mininterval=self.tqdm_interval_sec)
             done = False
+            sampled_action = []
             while not done:
                 Do = obs.shape[-1] // 2
                 # create obs dict
                 np_obs_dict = {
                     # handle n_latency_steps by discarding the last n_latency_steps
-                    "obs": obs[..., : self.n_obs_steps, :Do].astype(np.float32),
-                    "obs_mask": obs[..., : self.n_obs_steps, Do:] > 0.5,
+                    'obs': obs[...,:self.n_obs_steps,:Do].astype(np.float32),
+                    'obs_mask': obs[...,:self.n_obs_steps,Do:] > 0.5
                 }
                 if self.past_action and (past_action is not None):
                     # TODO: not tested
-                    np_obs_dict["past_action"] = past_action[
-                        :, -(self.n_obs_steps - 1) :
-                    ].astype(np.float32)
-
+                    np_obs_dict['past_action'] = past_action[
+                        :,-(self.n_obs_steps-1):].astype(np.float32)
+                
                 # device transfer
-                obs_dict = dict_apply(
-                    np_obs_dict, lambda x: torch.from_numpy(x).to(device=device)
-                )
+                obs_dict = dict_apply(np_obs_dict, 
+                    lambda x: torch.from_numpy(x).to(
+                        device=device))
 
                 # run policy
                 with torch.no_grad():
                     action_dict = policy.predict_action(obs_dict)
-
                 # device_transfer
-                np_action_dict = dict_apply(
-                    action_dict, lambda x: x.detach().to("cpu").numpy()
-                )
-
-                # handle latency_steps, we discard the first n_latency_steps actions
-                # to simulate latency
-                action = np_action_dict["action"][:, self.n_latency_steps :]
-
+                np_action_dict = dict_apply(action_dict,
+                    lambda x: x.detach().to('cpu').numpy())
+                #to simulate latency
+                action = np_action_dict['action'][:,self.n_latency_steps:]
+                # print(self.n_latency_steps)
+                # print("action_type",action.type)
+                # print("action[0]",action[0])
+                # if (self.env.statelist==[]):
+                #     print("shape = []")
+                # else:
+                #     print("statelist[0][0]",(self.env.statelist[0][0]))
+                #     print("action[0]",action[0])
+                with torch.no_grad(): #(56,8,2) (20,56,8,2)
+                    action_samples = []
+                    for _ in range(20):  # Sample 20 actions for variance calculation
+                        action_dict = policy.predict_action(obs_dict)
+                        np_action_dict = dict_apply(action_dict,lambda x: x.detach().to('cpu').numpy())
+                        action = np_action_dict['action'][:,self.n_latency_steps:]
+                        action_samples.append(action)
+                    action = action_samples[0]
+                    action_variance = np.var(action_samples, axis=0) #(56,8,2)
+                    mean_variance = np.mean(action_variance, axis=1, keepdims=True)
+                    mean_variance = np.repeat(mean_variance, 8, axis=1)
+                    # print(mean_variance)                          
                 # step env
-                obs, reward, done, info = env.step(action)
+                action_and_var = np.concatenate((action, mean_variance), axis=-1)
+                # print("actionandvar.shape",action_and_var.shape)
+
+                obs, reward, done, info = env.step(action_and_var)
                 done = np.all(done)
                 past_action = action
 
@@ -250,30 +260,69 @@ class PushTKeypointsRunner(BaseLowdimRunner):
 
             # collect data for this round
             all_video_paths[this_global_slice] = env.render()[this_local_slice]
-            all_rewards[this_global_slice] = env.call("get_attr", "reward")[
-                this_local_slice
-            ]
+            all_rewards[this_global_slice] = env.call('get_attr', 'reward')[this_local_slice]
         # import pdb; pdb.set_trace()
-
+        # print(env.statelist[0])
+        # print("env.statelist[0]",env.statelist[0])
+        # print("env.statelist[0][0][0][-1][pos_agent]",env.statelist[0][0][0][-1]['pos_agent'])
+        # print("len(env.statelist)",len(env.statelist)) # 56
+        # print("len(env.statelist[0][0])",len(env.statelist[0][0])) # 108
+        # print("len(env.statelist[0][0][0])",len(env.statelist[0][0][0])) # 4 是一个tuple，有一个pos_agent
+        # # print("type",type(env.statelist[0][0][0]))
+        # count_pos_agent = sum(1 for state in env.statelist[0][0] if isinstance(state[-1], dict) and 'pos_agent' in state[-1])
+        # # print(len(env.statelist[0]['pos_agent']))
+        # print("count",count_pos_agent)
+        # traj = env.statelist[0][-1]
         # log
+        for i, traj in enumerate(env.statelist):
+            # Extract the points in the trajectory
+            trajectory_points = [point[-1]['pos_agent'] for point in traj[0]]
+            trajectory_points = np.array(trajectory_points)
+            
+            # Plot the trajectory
+            plt.figure()  # Create a new figure for each trajectory
+            plt.plot(trajectory_points[:, 0], trajectory_points[:, 1], marker='o', markersize=3)
+            
+            # Set the title and labels
+            plt.title(f'Trajectory {i+1}')
+            plt.xlabel('X Position')
+            plt.ylabel('Y Position')
+            plt.grid(True)
+            
+            # Save the figure
+            plt.savefig(f'trajectory_{i+1}.png')
+            
+            # Optionally, display the plot
+            # plt.show()
+            
+            # Close the plot to avoid overlapping of plots in the next iteration
+            plt.close()
         max_rewards = collections.defaultdict(list)
         log_data = dict()
-        for i in range(len(self.env_fns)):
+        # results reported in the paper are generated using the commented out line below
+        # which will only report and average metrics from first n_envs initial condition and seeds
+        # fortunately this won't invalidate our conclusion since
+        # 1. This bug only affects the variance of metrics, not their mean
+        # 2. All baseline methods are evaluated using the same code
+        # to completely reproduce reported numbers, uncomment this line:
+        # for i in range(len(self.env_fns)):
+        # and comment out this line
+        for i in range(n_inits):
             seed = self.env_seeds[i]
             prefix = self.env_prefixs[i]
             max_reward = np.max(all_rewards[i])
             max_rewards[prefix].append(max_reward)
-            log_data[prefix + f"sim_max_reward_{seed}"] = max_reward
+            log_data[prefix+f'sim_max_reward_{seed}'] = max_reward
 
             # visualize sim
             video_path = all_video_paths[i]
             if video_path is not None:
                 sim_video = wandb.Video(video_path)
-                log_data[prefix + f"sim_video_{seed}"] = sim_video
+                log_data[prefix+f'sim_video_{seed}'] = sim_video
 
         # log aggregate metrics
         for prefix, value in max_rewards.items():
-            name = prefix + "mean_score"
+            name = prefix+'mean_score'
             value = np.mean(value)
             log_data[name] = value
 

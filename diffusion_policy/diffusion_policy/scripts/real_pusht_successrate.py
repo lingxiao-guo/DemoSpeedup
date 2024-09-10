@@ -13,33 +13,33 @@ import numpy as np
 from tqdm import tqdm
 import json
 
-
 @click.command()
 @click.option(
-    "--reference",
-    "-r",
-    required=True,
-    help="Reference metrics_raw.json from demonstration dataset.",
+    '--reference', '-r', required=True,
+    help='Reference metrics_raw.json from demonstration dataset.'
 )
-@click.option("--input", "-i", required=True, help="Data search path")
+@click.option(
+    '--input', '-i', required=True,
+    help='Data search path'
+)
 def main(reference, input):
     # compute the min last metric for demo metrics
-    demo_metrics = json.load(open(reference, "r"))
-    demo_min_metrics = collections.defaultdict(lambda: float("inf"))
+    demo_metrics = json.load(open(reference, 'r'))
+    demo_min_metrics = collections.defaultdict(lambda:float('inf'))
     for episode_idx, metrics in demo_metrics.items():
         for key, value in metrics.items():
             last_value = value[-1]
             demo_min_metrics[key] = min(demo_min_metrics[key], last_value)
     print(demo_min_metrics)
 
-    # find all metric
-    name = "metrics_raw.json"
+    # find all metric 
+    name = 'metrics_raw.json'
     search_dir = pathlib.Path(input)
     success_rate_map = dict()
-    for json_path in search_dir.glob("**/" + name):
+    for json_path in search_dir.glob('**/'+name):
         rel_path = json_path.relative_to(search_dir)
         rel_name = str(rel_path.parent)
-        this_metrics = json.load(json_path.open("r"))
+        this_metrics = json.load(json_path.open('r'))
         metric_success_idxs = collections.defaultdict(list)
         metric_failure_idxs = collections.defaultdict(list)
         for episode_idx, metrics in this_metrics.items():
@@ -61,10 +61,9 @@ def main(reference, input):
             metric_success_rate[key] = len(value) / n_episodes
         # metric_success_rate['failured_idxs'] = metric_failure_idxs
         success_rate_map[rel_name] = metric_success_rate
-
+    
     text = json.dumps(success_rate_map, indent=2)
     print(text)
 
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

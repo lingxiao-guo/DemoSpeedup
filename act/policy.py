@@ -46,6 +46,18 @@ class ACTPolicy(nn.Module):
                 qpos, image, env_state
             )  # no action, sample from prior
             return a_hat
+    
+    def get_entropy(self, qpos, image, actions=None, is_pad=None):
+        env_state = None
+        normalize = transforms.Normalize(
+            mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
+        )
+        image = normalize(image)
+        # inference time
+        a_hat, a_entropy, a_marginal_entropy = self.model.get_entropy(
+            qpos, image, env_state
+        )  # no action, sample from prior
+        return a_hat, a_entropy, a_marginal_entropy
 
     def configure_optimizers(self):
         return self.optimizer

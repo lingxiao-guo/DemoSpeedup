@@ -30,13 +30,12 @@ from diffusion_policy.model.common.lr_scheduler import get_scheduler
 
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
-
 class TrainDiffusionUnetVideoWorkspace(BaseWorkspace):
-    include_keys = ["global_step", "epoch"]
+    include_keys = ['global_step', 'epoch']
 
     def __init__(self, cfg: OmegaConf, output_dir=None):
         super().__init__(cfg, output_dir=output_dir)
-
+        
         # set seed
         seed = cfg.training.seed
         torch.manual_seed(seed)
@@ -52,8 +51,7 @@ class TrainDiffusionUnetVideoWorkspace(BaseWorkspace):
 
         # configure training state
         self.optimizer = hydra.utils.instantiate(
-            cfg.optimizer, params=self.model.parameters()
-        )
+            cfg.optimizer, params=self.model.parameters())
 
         # configure training state
         self.global_step = 0
@@ -85,30 +83,33 @@ class TrainDiffusionUnetVideoWorkspace(BaseWorkspace):
             cfg.training.lr_scheduler,
             optimizer=self.optimizer,
             num_warmup_steps=cfg.training.lr_warmup_steps,
-            num_training_steps=(len(train_dataloader) * cfg.training.num_epochs)
-            // cfg.training.gradient_accumulate_every,
+            num_training_steps=(
+                len(train_dataloader) * cfg.training.num_epochs) \
+                    // cfg.training.gradient_accumulate_every,
             # pytorch assumes stepping LRScheduler every epoch
             # however huggingface diffusers steps it every batch
-            last_epoch=self.global_step - 1,
+            last_epoch=self.global_step-1
         )
 
         # configure ema
         ema: EMAModel = None
         if cfg.training.use_ema:
-            ema = hydra.utils.instantiate(cfg.ema, model=self.ema_model)
+            ema = hydra.utils.instantiate(
+                cfg.ema,
+                model=self.ema_model)
 
         # configure env
         env_runner: BaseImageRunner
         env_runner = hydra.utils.instantiate(
-            cfg.task.env_runner, output_dir=self.output_dir
-        )
+            cfg.task.env_runner,
+            output_dir=self.output_dir)
         assert isinstance(env_runner, BaseImageRunner)
 
         # configure logging
         wandb_run = wandb.init(
             dir=str(self.output_dir),
             config=OmegaConf.to_container(cfg, resolve=True),
-            **cfg.logging,
+            **cfg.logging
         )
         wandb.config.update(
             {
@@ -118,7 +119,8 @@ class TrainDiffusionUnetVideoWorkspace(BaseWorkspace):
 
         # configure checkpoint
         topk_manager = TopKCheckpointManager(
-            save_dir=os.path.join(self.output_dir, "checkpoints"), **cfg.checkpoint.topk
+            save_dir=os.path.join(self.output_dir, 'checkpoints'),
+            **cfg.checkpoint.topk
         )
 
         # device transfer
@@ -133,12 +135,8 @@ class TrainDiffusionUnetVideoWorkspace(BaseWorkspace):
 
         # training loop
         for _ in range(cfg.training.num_epochs):
-            with tqdm.tqdm(
-                train_dataloader,
-                desc=f"Training epoch {self.epoch}",
-                leave=False,
-                mininterval=cfg.training.tqdm_interval_sec,
-            ) as tepoch:
+            with tqdm.tqdm(train_dataloader, desc=f"Training epoch {self.epoch}", 
+                    leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
                 for batch in tepoch:
                     # device transfer
                     batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
@@ -153,7 +151,7 @@ class TrainDiffusionUnetVideoWorkspace(BaseWorkspace):
                         self.optimizer.step()
                         self.optimizer.zero_grad()
                         lr_scheduler.step()
-
+                    
                     # update ema
                     if cfg.training.use_ema:
                         ema.step(self.model)
@@ -162,10 +160,10 @@ class TrainDiffusionUnetVideoWorkspace(BaseWorkspace):
                     raw_loss_cpu = raw_loss.item()
                     # tepoch.set_postfix(loss=raw_loss_cpu, refresh=False)
                     step_log = {
-                        "train_loss": raw_loss_cpu,
-                        "global_step": self.global_step,
-                        "epoch": self.epoch,
-                        "lr": lr_scheduler.get_last_lr()[0],
+                        'train_loss': raw_loss_cpu,
+                        'global_step': self.global_step,
+                        'epoch': self.epoch,
+                        'lr': lr_scheduler.get_last_lr()[0]
                     }
 
                     # eval
@@ -187,12 +185,10 @@ class TrainDiffusionUnetVideoWorkspace(BaseWorkspace):
                         if cfg.checkpoint.save_last_snapshot:
                             self.save_snapshot()
 
-                        save_path = topk_manager.get_ckpt_path(
-                            {
-                                "epoch": self.epoch,
-                                "test_score": runner_log["test/mean_score"],
-                            }
-                        )
+                        save_path = topk_manager.get_ckpt_path({
+                            'epoch': self.epoch,
+                            'test_score': runner_log['test/mean_score']
+                        })
                         if save_path is not None:
                             self.save_checkpoint(path=save_path)
 
@@ -205,16 +201,14 @@ class TrainDiffusionUnetVideoWorkspace(BaseWorkspace):
                         policy.eval()
                         with torch.no_grad():
                             # sample trajectory from training set, and evaluate difference
-                            batch = dict_apply(
-                                val_batch, lambda x: x.to(device, non_blocking=True)
-                            )
-                            obs_dict = batch["obs"]
-                            gt_action = batch["action"]
-
+                            batch = dict_apply(val_batch, lambda x: x.to(device, non_blocking=True))
+                            obs_dict = batch['obs']
+                            gt_action = batch['action']
+                            
                             result = policy.predict_action(obs_dict)
-                            pred_action = result["action_pred"]
+                            pred_action = result['action_pred']
                             mse = torch.nn.functional.mse_loss(pred_action, gt_action)
-                            step_log["train_action_mse_error"] = mse.item()
+                            step_log['train_action_mse_error'] = mse.item()
                             del batch
                             del obs_dict
                             del gt_action
@@ -229,16 +223,13 @@ class TrainDiffusionUnetVideoWorkspace(BaseWorkspace):
                     self.global_step += 1
             self.epoch += 1
 
-
 @hydra.main(
     version_base=None,
-    config_path=str(pathlib.Path(__file__).parent.parent.joinpath("config")),
-    config_name=pathlib.Path(__file__).stem,
-)
+    config_path=str(pathlib.Path(__file__).parent.parent.joinpath("config")), 
+    config_name=pathlib.Path(__file__).stem)
 def main(cfg):
     workspace = TrainDiffusionUnetVideoWorkspace(cfg)
     workspace.run()
-
 
 if __name__ == "__main__":
     main()

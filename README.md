@@ -110,9 +110,17 @@ If you need real robot data, please contact Lucy Shi: lucyshi (at) stanford (dot
 ### Usage
 Please replace `[TASK]` with your desired task to train. `[TASK]={sim_transfer_cube_scripted, sim_insertion_scripted, sim_transfer_cube_human, sim_insertion_human}`
 
+* Collect demos for replay
+```bash
+python act/imitate_episodes.py --task_name sim_insertion_human  --ckpt_dir data/outputs/act_ckpt/sim_insertion_human_waypoi --policy_class ACT --kl_weight 10 --chunk_size 50 --hidden_dim 512 --batch_size 8 --dim_feedforward 3200 --num_epochs 8000 --lr 1e-5 --seed 0 --temporal_agg --eval --save_demos
+```
+* Replay demos
+```bash
+python example/act_replay.py --dataset data/act_replay/sim_transfer_cube_human --ckpt_dir data/outputs/act_ckpt/sim_transfer_cube_human_gaussian --task_name sim_transfer_cube_human --use_entropy_waypoint --end_idx 9
+```
 * Visualize waypoints
 ```bash
-python example/act_waypoint.py --dataset=data/act/[TASK] --err_threshold=0.01 --plot_3d --end_idx=0 
+python example/act_waypoint.py --dataset=data/act_speed/sim_transfer_cube_human --err_threshold=0.01 --plot_3d  --task_name sim_transfer_cube_human    --ckpt_dir data/outputs/act_ckpt/sim_transfer_cube_human_gaussian  --end_idx=0
 ```
 
 * Save waypoints

@@ -32,11 +32,11 @@ class KMeansDiscretizer(DictOfTensorMixin):
         cluster_centers = KMeansDiscretizer._kmeans(
             flattened_actions, ncluster=self.n_bins
         )
-        self.params_dict["bin_centers"] = cluster_centers
+        self.params_dict['bin_centers'] = cluster_centers
 
     @property
     def suggested_actions(self) -> torch.Tensor:
-        return self.params_dict["bin_centers"]
+        return self.params_dict['bin_centers']
 
     @classmethod
     def _kmeans(cls, x: torch.Tensor, ncluster: int = 512, niter: int = 50):
@@ -89,11 +89,7 @@ class KMeansDiscretizer(DictOfTensorMixin):
         # get the closest cluster center
         closest_cluster_center = torch.argmin(
             torch.sum(
-                (
-                    flattened_actions[:, None, :]
-                    - self.params_dict["bin_centers"][None, :, :]
-                )
-                ** 2,
+                (flattened_actions[:, None, :] - self.params_dict['bin_centers'][None, :, :]) ** 2,
                 dim=2,
             ),
             dim=1,
@@ -130,7 +126,7 @@ class KMeansDiscretizer(DictOfTensorMixin):
         if type(latent_action_batch) == tuple:
             latent_action_batch, offsets = latent_action_batch
         # get the closest cluster center
-        closest_cluster_center = self.params_dict["bin_centers"][latent_action_batch]
+        closest_cluster_center = self.params_dict['bin_centers'][latent_action_batch]
         # Reshape to the original shape
         reconstructed_action = closest_cluster_center.view(
             latent_action_batch.shape[:-1] + (self.action_dim,)

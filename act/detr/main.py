@@ -104,6 +104,9 @@ def get_args_parser():
 
     # repeat args in imitate_episodes just to avoid error. Will not be used
     parser.add_argument("--eval", action="store_true")
+    parser.add_argument(
+        "--visualize_entropy", action="store_true", help="visualize trajectory entropy"
+    )
     parser.add_argument("--onscreen_render", action="store_true")
     parser.add_argument(
         "--ckpt_dir", action="store", type=str, help="ckpt_dir", required=True
@@ -113,14 +116,19 @@ def get_args_parser():
         action="store",
         type=str,
         help="policy_class, capitalize",
-        required=True,
     )
     parser.add_argument(
         "--task_name", action="store", type=str, help="task_name", required=True
     )
-    parser.add_argument("--seed", action="store", type=int, help="seed", required=True)
     parser.add_argument(
-        "--num_epochs", action="store", type=int, help="num_epochs", required=True
+        "--dataset", action="store", type=str, help="data_path"
+    )
+    parser.add_argument(
+        "--err_threshold", action="store", type=float, help="data_path"
+    )
+    parser.add_argument("--seed", action="store", type=int, help="seed")
+    parser.add_argument(
+        "--num_epochs", action="store", type=int, help="num_epochs"
     )
     parser.add_argument(
         "--kl_weight", action="store", type=int, help="KL Weight", required=False
@@ -128,6 +136,7 @@ def get_args_parser():
     parser.add_argument(
         "--chunk_size", action="store", type=int, help="chunk_size", required=False
     )
+    parser.add_argument("--save_demos", default=False, action="store_true")
     parser.add_argument("--temporal_agg", action="store_true")
     parser.add_argument("--use_waypoint", action="store_true")
     parser.add_argument(
@@ -136,6 +145,11 @@ def get_args_parser():
         type=int,
         help="constant_waypoint",
         required=False,
+    )
+    parser.add_argument(
+        "--save_waypoints",
+        action="store_true",
+        help="(optional) whether to save waypoints",
     )
     parser.add_argument(
         "--eval_freq", action="store", type=int, help="eval_freq", required=False

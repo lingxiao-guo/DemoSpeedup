@@ -146,7 +146,9 @@ class MinGPT(latent_generator.AbstractLatentGenerator):
             else:
                 return logits, loss
 
-    def generate_latents(self, obs_rep: torch.Tensor) -> torch.Tensor:
+    def generate_latents(
+        self, obs_rep: torch.Tensor
+    ) -> torch.Tensor:
         batch, seq, embed = obs_rep.shape
 
         output, _ = self.model(obs_rep, None)

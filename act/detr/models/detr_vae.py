@@ -5,21 +5,57 @@ DETR model and criterion classes.
 import torch
 from torch import nn
 from torch.autograd import Variable
+import torch.distributions as dist
 from .backbone import build_backbone
 from .transformer import build_transformer, TransformerEncoder, TransformerEncoderLayer
-
+from .entropy_utils import kozachenko_leonenko_entropy, KDE
 import numpy as np
 
 import IPython
 
 e = IPython.embed
-
+KDE = KDE()
 
 def reparametrize(mu, logvar):
     std = logvar.div(2).exp()
     eps = Variable(std.data.new(std.size()).normal_())
     return mu + std * eps
 
+def reparametrize_n(mu, std, n):
+    eps = Variable(std.data.new(n, *std.size()).normal_())
+    return mu.unsqueeze(0) + std.unsqueeze(0) * eps
+
+def gaussian_pdf(x, mean, std):
+    """
+    计算给定样本在多元高斯分布下的对数概率密度函数。
+    
+    Args:
+    - x (torch.Tensor): 样本，形状为 (batch_size, n_samples, dim)
+    - mean (torch.Tensor): 均值，形状为 (batch_size, dim)
+    - std (torch.Tensor): 标准差，形状为 (batch_size, dim)
+    
+    Returns:
+    - log_pdf (torch.Tensor): 对数概率密度，形状为 (batch_size, n_samples)
+    """
+    # 计算协方差矩阵的对数行列式
+    variance = std ** 2
+    variance_clamped = torch.clamp(variance, min=1e-6)
+    log_cov_det = torch.sum(torch.log(variance_clamped), dim=-1,keepdim=True)
+    # 计算协方差矩阵的逆
+    cov_inv = torch.diag_embed(1.0 / variance)
+    
+    # 计算样本与均值的差
+    x_minus_mean = x - mean.unsqueeze(1)
+    
+    # 计算对数概率密度函数
+    dim = x.size(-1)
+    term1 = -0.5 * (dim * torch.log(torch.tensor(2. * torch.pi)) + log_cov_det)
+    term2 = -0.5 * torch.sum((x_minus_mean @ cov_inv) * x_minus_mean, dim=-1)
+    log_pdf = term1 + term2
+    # print(f"log_pdf:{log_pdf}")
+    # print(f"term1:{term1}")
+    # print(f"term2:{term2}")
+    return log_pdf.exp().squeeze(-1)
 
 def get_sinusoid_encoding_table(n_position, d_hid):
     def get_position_angle_vec(position):
@@ -59,6 +95,7 @@ class DETRVAE(nn.Module):
         self.encoder = encoder
         hidden_dim = transformer.d_model
         self.action_head = nn.Linear(hidden_dim, state_dim)
+        self.state_dim = state_dim
         self.is_pad_head = nn.Linear(hidden_dim, 1)
         self.query_embed = nn.Embedding(num_queries, hidden_dim)
         if backbones is not None:
@@ -137,11 +174,12 @@ class DETRVAE(nn.Module):
             logvar = latent_info[:, self.latent_dim :]
             latent_sample = reparametrize(mu, logvar)
             latent_input = self.latent_out_proj(latent_sample)
-        else:
+        else:            
             mu = logvar = None
-            latent_sample = torch.zeros([bs, self.latent_dim], dtype=torch.float32).to(
-                qpos.device
-            )
+            mu = logvar = torch.zeros([bs, self.latent_dim], dtype=torch.float32).to(qpos.device)
+            latent_sample = reparametrize(mu, logvar)
+            # latent_sample = torch.zeros([bs, self.latent_dim], dtype=torch.float32).to(qpos.device)
+            
             latent_input = self.latent_out_proj(latent_sample)
 
         if self.backbones is not None:
@@ -178,6 +216,93 @@ class DETRVAE(nn.Module):
         a_hat = self.action_head(hs)
         is_pad_hat = self.is_pad_head(hs)
         return a_hat, is_pad_hat, [mu, logvar]
+        
+
+    def get_entropy(self, qpos, image, env_state=None, num_z_samples = 20, num_a_samples_perz = 1,actions=None, is_pad=None):
+        """
+        estimate entropy from Monta Carlo sampling
+        qpos: batch, qpos_dim
+        image: batch, num_cam, channel, height, width
+        env_state: None
+        actions: batch, seq, action_dim
+        """
+        is_training = actions is not None  # train or val
+        bs, _ = qpos.shape
+        ### Obtain latent z from action sequence
+        if not is_training:         
+            mu = logvar = torch.zeros([bs, self.latent_dim], dtype=torch.float32).to(qpos.device)
+            latent_sample = reparametrize_n(mu, logvar.div(2).exp(), num_z_samples)
+            latent_sample = latent_sample.reshape(num_z_samples*bs, self.latent_dim)
+            # latent_sample = torch.zeros([num_z_samples*bs, self.latent_dim], dtype=torch.float32).to(qpos.device)
+            latent_input = self.latent_out_proj(latent_sample)
+
+        if self.backbones is not None:
+            # Image observation features and position embeddings
+            all_cam_features = []
+            all_cam_pos = []
+            for cam_id, cam_name in enumerate(self.camera_names):
+                features, pos = self.backbones[0](image[:, cam_id])  # HARDCODED
+                features = features[0]  # take the last layer feature
+                pos = pos[0]
+                all_cam_features.append(self.input_proj(features))
+                all_cam_pos.append(pos)
+            # proprioception features
+            proprio_input = self.input_proj_robot_state(qpos)
+            # fold camera dimension into width dimension
+            src = torch.cat(all_cam_features, axis=3)
+            pos = torch.cat(all_cam_pos, axis=3)
+            src = torch.repeat_interleave(src, num_z_samples, dim=0)
+            proprio_input = torch.repeat_interleave(proprio_input, num_z_samples, dim=0)
+            
+            hs = self.transformer(
+                src,
+                None,
+                self.query_embed.weight,
+                pos,
+                latent_input,
+                proprio_input,
+                self.additional_pos_embed.weight,
+            )[0]
+        else:
+            qpos = self.input_proj_robot_state(qpos)
+            env_state = self.input_proj_env_state(env_state)
+            transformer_input = torch.cat([qpos, env_state], axis=1)  # seq length = 2
+            hs = self.transformer(
+                transformer_input, None, self.query_embed.weight, self.pos.weight
+            )[0]
+        output = self.action_head(hs)
+        """output = output.reshape(num_z_samples, bs, -1,2*self.state_dim)
+        # a_hat_mean: (num_z_samples, bs, t, state_dim)
+        a_hat_mean = output[:,:,:,:self.state_dim]
+        a_hat = torch.mean(a_hat_mean, dim=0)
+        a_log_var = output[:,:,:,self.state_dim:]
+        a_std = a_log_var.div(2).exp() 
+        # a_std = 0.0001 * torch.ones_like(a_log_var)
+        # print(f"a_std:{a_std}")
+        pdf_values = torch.zeros((bs*self.num_queries, num_a_samples_perz*num_z_samples),device=qpos.device)
+        # a_samples: (num_a_samples_perz, num_z_samples, bs, t, state_dim)
+        a_samples = reparametrize_n(a_hat_mean,a_std,num_a_samples_perz)
+        a_samples = a_samples.reshape(num_a_samples_perz * num_z_samples, bs, -1, self.state_dim)
+        """
+        a_samples = output.reshape(num_z_samples, bs, -1, self.state_dim)
+        # Calculate entropy from MC
+        # a_samples_scale: (bs*t, samples, dim)
+        # for k in range(num_z_samples):
+        #     pdf_values_k = gaussian_pdf(a_samples_scale, a_mean_scale[k], a_std_scale[k])
+        #     pdf_values += pdf_values_k/num_z_samples
+            # print("pdf_values_k",pdf_values_k)
+        # a_entropy = -torch.log(torch.sum(pdf_values,dim=-1))/(num_a_samples_perz*num_z_samples)
+        """
+        Calculate entropy from MC is not possible,
+        Since the variance of Gaussian is too small. 
+        Needs about 1e35 samples to approximate!
+        """
+        # Calculate entropy from KNN
+        # a_entropy = kozachenko_leonenko_entropy(a_samples.reshape(num_a_samples_perz * num_z_samples, -1, self.state_dim).permute(1,0,2))
+        # Calculate entropy from kernal
+        a_entropy = KDE.kde_entropy(a_samples.reshape(num_a_samples_perz * num_z_samples, -1, self.state_dim).permute(1,0,2))
+        a_marginal_entropy = KDE.kde_marginal_action_entropy(a_samples.reshape(num_a_samples_perz * num_z_samples, -1, self.state_dim).permute(1,0,2))
+        return a_samples, a_entropy.reshape(bs, -1, 1), a_marginal_entropy.reshape(bs, -1, self.state_dim)
 
 
 class CNNMLP(nn.Module):
