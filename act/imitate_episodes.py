@@ -715,7 +715,7 @@ def plot_trajectory_variance(config, ckpt_name, save_demos=False,save_episode=Tr
         env_max_reward = env.task.max_reward
     
     query_frequency = policy_config["num_queries"]
-    if temporal_agg:
+    if temporal_agg: 
         query_frequency = 1
         num_queries = policy_config["num_queries"]
 
