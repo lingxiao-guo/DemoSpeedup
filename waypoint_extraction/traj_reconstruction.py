@@ -93,14 +93,14 @@ def geometric_waypoint_trajectory(actions, gt_states, waypoints, return_list=Fal
 
 
 def pos_only_geometric_waypoint_trajectory(
-    actions, gt_states, waypoints, return_list=False
+    actions, gt_states, waypoints, return_list=False, return_mean=False
 ):
     """Compute the geometric trajectory from the waypoints"""
 
     # prepend 0 to the waypoints for geometric computation
     if waypoints[0] != 0:
         waypoints = [0] + waypoints
-
+    
     keypoints_pos = [actions[k] for k in waypoints]
     state_err = []
     n_segments = len(waypoints) - 1
@@ -127,10 +127,66 @@ def pos_only_geometric_waypoint_trajectory(
     #     f"Average pos error: {np.mean(state_err):.6f} \t Max pos error: {np.max(state_err):.6f}"
     # )
     state_err.append(0)
-    if return_list:
-        return total_traj_err(state_err), state_err
-    else:
-        return total_traj_err(state_err)
+    if True:
+        if return_list:
+            return total_traj_err(state_err), state_err
+        else:
+            return total_traj_err(state_err)
+
+def gripper_change_detect(actions, gt_states,err_threshold=0.012):
+    gripper_change_indices = []
+    for t in range(len(gt_states)-1):
+        if any(np.abs(gt_states[t+1,[6,13]]-gt_states[t,[6,13]]) > err_threshold):
+            gripper_change_indices.append(t)
+    return gripper_change_indices
+
+def pos_only_geometric_entropy_trajectory(
+    actions, gt_states, waypoints, entropy, return_list=False, return_mean=False
+):
+    """Compute the geometric trajectory from the waypoints"""
+
+    # prepend 0 to the waypoints for geometric computation
+    if waypoints[0] != 0:
+        waypoints = [0] + waypoints
+    
+    entropy_weights = calculate_weights_from_entropy(entropy).squeeze()
+    gripper_indices = gripper_change_detect(actions, gt_states)
+    entropy_weights[gripper_indices] = np.max(entropy_weights)*0.99
+    mean = np.mean(entropy_weights)
+    entropy_weights[np.where(entropy_weights>mean)[0]] = 5
+    entropy_weights[np.where(entropy_weights<mean)[0]] = 0.1
+    keypoints_pos = [actions[k] for k in waypoints]
+    state_err = []
+    n_segments = len(waypoints) - 1
+
+    for i in range(n_segments):
+        # Get the current keypoint and the next keypoint
+        start_keypoint_pos = keypoints_pos[i]
+        end_keypoint_pos = keypoints_pos[i + 1]
+
+        # Select ground truth points within the current segment
+        start_idx = waypoints[i]
+        end_idx = waypoints[i + 1]
+        segment_points_pos = gt_states[start_idx:end_idx]
+        segment_entropy_weights = entropy_weights[start_idx:end_idx]
+        # Compute the shortest distances between ground truth points and the current segment
+        for i in range(len(segment_points_pos)):
+            pos_err = point_line_distance(
+                segment_points_pos[i], start_keypoint_pos, end_keypoint_pos
+            )
+            state_err.append(pos_err*segment_entropy_weights[i])
+
+    # print the average and max error
+    # print(
+    #     f"Average pos error: {np.mean(state_err):.6f} \t Max pos error: {np.max(state_err):.6f}"
+    # )
+    state_err.append(0)
+    if True:
+        if return_list:
+            return total_traj_err(state_err), state_err
+        else:
+            return total_traj_err(state_err)
+
 
 def calculate_weights_from_entropy(actions_entropy, sigma=0.5):
     """
@@ -141,16 +197,19 @@ def calculate_weights_from_entropy(actions_entropy, sigma=0.5):
     # entropy_weights = np.clip(1 -actions_entropy,1e-6,1e6) 
     # entropy_weights = np.clip(0.5 - actions_entropy,1e-6,1e6)
     # entropy_weights = np.exp(actions_entropy)
-    entropy_weights = 1+actions_entropy
+    # actions_entropy = (actions_entropy-np.min(actions_entropy))/(np.max(actions_entropy)-np.min(actions_entropy))
+    # entropy_weights = np.log(actions_entropy+1e-8)
+    # entropy_weights = (entropy_weights - np.mean(entropy_weights))/np.var(entropy_weights)
     # entropy_weights = np.clip(0.5-0.5*actions_entropy/np.max(np.abs(actions_entropy)),0,1e6)*5
+    entropy_weights = np.exp(actions_entropy)
     len_ = actions_entropy.shape[0]
     # 分母后面应该用整个数据集统计到的，而不是每条demos的来确保一致性
-    entropy_weights = len_ * entropy_weights/np.sum(entropy_weights)
+    # entropy_weights = len_ * entropy_weights/np.sum(entropy_weights)
     # 感觉这里不该/np.sum(actions_entropy)，因为会导致每个demos都不一样，出现多模态性
     return entropy_weights 
 
 from act.convert_ee import get_ee
-def pos_only_geometric_entropy_trajectory(
+def pos_only_entropy_waypoint_trajectory(
     x, actions, gt_states,  actions_entropy, indices=None,return_list=False
 ):
     """Compute the geometric trajectory from the waypoints"""
@@ -163,6 +222,11 @@ def pos_only_geometric_entropy_trajectory(
     waypoints = list(waypoints)
     waypoints.sort()
     waypoints = list(set(waypoints))
+    if indices is not None:
+        # Remove duplicate elements between waypoints and indices, but allow indices has duplicate elements
+        waypoints = [item for item in waypoints if item not in indices]
+        waypoints.extend(indices)
+    waypoints.sort()
     entropy_weights = calculate_weights_from_entropy(actions_entropy)
     keypoints_pos = [actions[k] for k in waypoints]
     state_err = []
@@ -171,8 +235,9 @@ def pos_only_geometric_entropy_trajectory(
     """# calculate ee rpy
     left_arm_ee = get_ee(qpos[:, :6], qpos[:, 6:7])
     right_arm_ee = get_ee(qpos[:, 7:13], qpos[:, 13:14])
-    qpos = np.concatenate([left_arm_ee[3:], right_arm_ee[3:]], axis=1)"""
-    """for i in range(n_segments):
+    eepos = np.concatenate([left_arm_ee[3:], right_arm_ee[3:]], axis=1)"""
+    ############################ linear distance #################################
+    for i in range(n_segments):
         # Get the current keypoint and the next keypoint
         start_keypoint_pos = keypoints_pos[i]
         end_keypoint_pos = keypoints_pos[i + 1]
@@ -181,21 +246,24 @@ def pos_only_geometric_entropy_trajectory(
         start_idx = waypoints[i]
         end_idx = waypoints[i + 1]
         segment_points_pos = gt_states[start_idx:end_idx]
-        segment_weight = entropy_weights[start_idx:end_idx]
+
         # Compute the shortest distances between ground truth points and the current segment
         for i in range(len(segment_points_pos)):
             pos_err = point_line_distance(
                 segment_points_pos[i], start_keypoint_pos, end_keypoint_pos
             )
-            # state_err.append(pos_err)
-            state_err.append(segment_weight[i] * 1)
+            state_err.append(pos_err)
 
     # print the average and max error
     # print(
     #     f"Average pos error: {np.mean(state_err):.6f} \t Max pos error: {np.max(state_err):.6f}"
     # )
-    state_err.append(0)"""
-
+    state_err.append(0)
+    if return_list:
+        return total_traj_err(state_err), waypoints
+    else:
+        return total_traj_err(state_err)
+    """########################### entropy & acceleration ###########################
     waypoints = [w for w in waypoints]
     velocity = np.diff(actions, axis=0)
     v_norm = np.linalg.norm(velocity, axis=-1)
@@ -206,25 +274,21 @@ def pos_only_geometric_entropy_trajectory(
     new_velocity_norm = np.linalg.norm(new_velocity,axis=-1)
     v_penalty = np.clip(new_velocity_norm-max_vscale, 0,1e6)
     new_acceleration_norm = np.linalg.norm(np.diff(new_velocity, axis=0), axis=-1)
-    # smooth
-    """smooth = 0
-    for i in range(len(velocity)):
-        # 计算前后5步内的间隔
-        nearby_indices = range(max(0, i-5), min(len(velocity)-1, i+5))
-        intervals = np.diff(action_norm[nearby_indices])
-        # 计算当前间隔与平均间隔的差的平方和
-        smooth += np.sum(np.abs(intervals - np.mean(intervals)))/len(nearby_indices)
-    smooth = smooth/len(velocity)"""
-    entropy_cost = entropy_weights[waypoints]
+    new_acceleration_norm = list(new_acceleration_norm)
+    new_acceleration_norm[0:0] = [0]*2
+    # compounding_weight = 1-0*np.arange(0,len(actions))/len(actions)
+    new_acceleration_norm = np.array(new_acceleration_norm)# *compounding_weight[waypoints]
+    entropy_cost = entropy_weights[waypoints]# *compounding_weight[waypoints]
     # Penalize len
-    entropy_complem = np.ones(((len(x)-len(waypoints),)))*np.max(entropy_weights)
-    entropy_cost = np.concatenate((entropy_cost,entropy_complem),axis=-1)
+    entropy_compensate = np.ones((np.abs(len(x)-len(waypoints),)))*np.max(entropy_weights)
+    entropy_cost = np.concatenate((entropy_cost,entropy_compensate),axis=-1)
     # entropy_cost = np.mean(0.5*(entropy_cost[1:]+entropy_cost[:-1]))
-    penalty =  10*np.max(new_acceleration_norm) + np.mean(entropy_cost)
+    
+    penalty = np.mean(entropy_cost) # + 5*np.mean(new_acceleration_norm) 
     if return_list:
         return penalty, waypoints  # 
     else:
-        return penalty
+        return penalty"""
   
         
 def geometric_entropy_trajectory(

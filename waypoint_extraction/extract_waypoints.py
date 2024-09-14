@@ -6,9 +6,11 @@ import copy
 from waypoint_extraction.traj_reconstruction import (
     pos_only_geometric_waypoint_trajectory,
     pos_only_geometric_entropy_trajectory,
+    pos_only_entropy_waypoint_trajectory,
     reconstruct_waypoint_trajectory,
     geometric_waypoint_trajectory,
     geometric_entropy_trajectory,
+    calculate_weights_from_entropy,
 )
 
 
@@ -243,6 +245,103 @@ def dp_waypoint_selection(
     _,distance = pos_only_geometric_waypoint_trajectory(actions, gt_states, waypoints, return_list=True)
     return waypoints, distance
 
+def optimize_waypoint_selection(
+    env=None,
+    actions=None,
+    gt_states=None,
+    err_threshold=None,
+    initial_states=None,
+    remove_obj=None,
+    pos_only=False,
+    entropy=None,
+):
+    if actions is None:
+        actions = copy.deepcopy(gt_states)
+    elif gt_states is None:
+        gt_states = copy.deepcopy(actions)
+        
+    num_frames = len(actions)
+    entropy_weights = calculate_weights_from_entropy(entropy)
+    gripper_change_indices = gripper_change_detect(actions,gt_states)
+    entropy_weights[gripper_change_indices] = np.min(entropy_weights)*1.1
+    print(np.max(entropy),np.min(entropy))
+    print(np.max(entropy_weights),np.min(entropy_weights))
+    # update err_threshold
+    all_err_threshold = []
+    for i in range(len(entropy_weights)):
+        all_err_threshold.append(err_threshold*entropy_weights)
+    all_err_threshold = np.array(all_err_threshold)
+    print(np.max(all_err_threshold))
+    # make the last frame a waypoint
+    initial_waypoints = [num_frames - 1]
+
+    # make the frames of gripper open/close waypoints
+    if not pos_only:
+        for i in range(num_frames - 1):
+            if actions[i, -1] != actions[i + 1, -1]:
+                initial_waypoints.append(i)
+                # initial_waypoints.append(i + 1)
+        initial_waypoints.sort()
+
+    # Memoization table to store the waypoint sets for subproblems
+    memo = {}
+
+    # Initialize the memoization table
+    for i in range(num_frames):
+        memo[i] = (0, [])
+
+    memo[1] = (1, [1])
+    func = (
+        pos_only_geometric_waypoint_trajectory
+        if pos_only
+        else geometric_waypoint_trajectory
+    )
+    
+    # Check if err_threshold is too small, then return all points as waypoints
+    min_error = func(actions, gt_states, list(range(1, num_frames)))
+    if err_threshold < min_error:
+        print("Error threshold is too small, returning all points as waypoints.")
+        return list(range(1, num_frames))
+
+    # Populate the memoization table using an iterative bottom-up approach
+    for i in range(1, num_frames):
+        min_waypoints_required = float("inf")
+        best_waypoints = []
+
+        for k in range(1, i):
+            # waypoints are relative to the subsequence
+            waypoints = [j - k for j in initial_waypoints if j >= k and j < i] + [i - k]
+
+            total_traj_err,all_traj_err = func(
+                actions=actions[k : i + 1],
+                gt_states=gt_states[k : i + 1],
+                waypoints=waypoints,
+                return_list=True
+            )
+            flag = np.min(np.array(all_traj_err)-all_err_threshold[k:i+1])<0
+            # this cause local pareto!
+            if (np.array(all_traj_err)-all_err_threshold[k:i+1]).all():
+                subproblem_waypoints_count, subproblem_waypoints = memo[k - 1]
+                total_waypoints_count = 1 + subproblem_waypoints_count
+
+                if total_waypoints_count < min_waypoints_required:
+                    min_waypoints_required = total_waypoints_count
+                    best_waypoints = subproblem_waypoints + [i]
+
+        memo[i] = (min_waypoints_required, best_waypoints)
+
+    min_waypoints_count, waypoints = memo[num_frames - 1]
+    waypoints += initial_waypoints
+    # remove duplicates
+    waypoints = list(set(waypoints))
+    waypoints.sort()
+    print(
+        f"Minimum number of waypoints: {len(waypoints)} \tTrajectory Error: {total_traj_err}"
+    )
+    print(f"waypoint positions: {waypoints}")
+    _,distance = pos_only_geometric_waypoint_trajectory(actions, gt_states, waypoints, return_list=True)
+    return waypoints, distance
+
 
 def preprocess_entropy(data):
     # log -> zscore
@@ -293,17 +392,21 @@ def entropy_waypoint_selection(
 
     memo[1] = (1, [1])
     obj_func = (
-        pos_only_geometric_entropy_trajectory
+        pos_only_entropy_waypoint_trajectory
         if pos_only
         else geometric_entropy_trajectory
     )
     
-    k = 142
-    
-    bounds = [(1, 10)] * k
+    k = 255
+    w_indices = None
+    # w_indices = gripper_change_detect(actions, gt_states)
+    # update k
+    bounds = [(1/10, 10)] * k
      
     # initial_guess = np.linspace(0, gt_states.shape[0] - 2, k)
     initial_guess = (num_frames-1)/k * np.ones((k)) 
+    
+
     """
     ##################### KNN for speed ######################
     
@@ -410,9 +513,10 @@ def entropy_waypoint_selection(
     
     # 初始化K-means
     kmeans = KMeans(n_clusters=num_clusters, random_state=0)
-
+    entropy_norm = len(actions_entropy)*actions_entropy-np.min(actions_entropy)/(np.max(actions_entropy)-np.min(actions_entropy))
+    action_entropy_time = np.concatenate((entropy_norm[:,None],np.arange(0,len(actions_entropy))[:,None]),axis=-1)
     # 执行聚类
-    kmeans.fit(actions_entropy[:,None])
+    kmeans.fit(action_entropy_time)
 
     # 获取每个数据点的聚类索引
     cluster_indices = kmeans.labels_
@@ -422,37 +526,42 @@ def entropy_waypoint_selection(
 
     # 获取每个聚类的平均值
     # 由于K-means会计算每个簇的中心点，所以可以直接用这些中心点来表示平均值
-    cluster_value_list = []
+    cluster_time_list = []
     cluster_indices_dict = {}
-    cluster_means = cluster_centers.flatten()
+    cluster_means = cluster_centers # .flatten()
     for cluster_id in range(num_clusters):
       if len(np.where(cluster_indices == cluster_id)[0]) >0:
             print(f"Cluster {cluster_id}:")
-            print(f"  Mean value: {cluster_means[cluster_id]:.4f}")
-            # print(f"  Indices: {np.where(cluster_indices == cluster_id)[0]}")
-            print(f"  Len: {len(np.where(cluster_indices == cluster_id)[0])}")
-            cluster_value_list.append(cluster_means[cluster_id])
-            cluster_indices_dict[f"{cluster_means[cluster_id]:.4f}"] = np.where(cluster_indices == cluster_id)[0]
-    cluster_value_list.sort()
+            print(f"  Mean value: {cluster_means[cluster_id]}")
+            print(f"  Indices: {np.where(cluster_indices == cluster_id)[0]}")
+            # print(f"  Len: {len(np.where(cluster_indices == cluster_id)[0])}")
+            # cluster_value_list.append(cluster_means[cluster_id])
+            cluster_time_list.append(cluster_means[cluster_id])
+            cluster_indices_dict[f"{cluster_means[cluster_id]}"] = np.where(cluster_indices == cluster_id)[0]
+    # cluster_value_list.sort()
+    cluster_time_list.sort(key=lambda x: x[1])
     l = 0
-    indices = []
+    w_indices = []
     for i in range(num_clusters):
-        if i==0 or i==1:
-            indices_temp = cluster_indices_dict[f"{cluster_value_list[i]:.4f}"]
-            waypoints.extend(indices_temp[:])
+            # if i==0 or i==1:
+            indices_temp = cluster_indices_dict[f"{cluster_time_list[i]}"]
+            print(f"indices:{indices_temp}")
+            if i ==0 and cluster_time_list[i][0]< cluster_time_list[i+1][0]:
+                w_indices.append(indices_temp)
+            elif i==num_clusters-1 and cluster_time_list[i][0]> cluster_time_list[i-1][0]:
+                indices_temp[0:0] = [indices_temp[0]] * 9
+                w_indices.append(indices_temp)
+            elif (i>0 and i<num_clusters-1) and cluster_time_list[i][0]< cluster_time_list[i+1][0] and cluster_time_list[i][0]> cluster_time_list[i-1][0]:
+                indices_temp[0:0] = [indices_temp[0]] * 9
+                w_indices.append(indices_temp)
+            
             l += len(indices_temp)
-        elif i==2:
-            indices_temp = cluster_indices_dict[f"{cluster_value_list[i]:.4f}"]
-            waypoints.extend(indices_temp[::2])
-            l += len(indices_temp)
-        elif i==3:
-            indices.extend(cluster_indices_dict[f"{cluster_value_list[i]:.4f}"])
-            waypoints.extend(indices[0::2])
-        elif i==4:
-            indices = cluster_indices_dict[f"{cluster_value_list[i]:.4f}"]
-            waypoints.extend(indices[0::2])
-    ################# KNN for entropy #####################
-    """
+            print(f"new indices:{indices_temp}") 
+            
+            
+        
+    
+    ################ SLSQP -> Actually return to Const Solution ####################
     def constraint(x, actions, sigma=2):
         # Constraints: choosing k points
         waypoints = (np.cumsum(x)-x[0])*399/np.sum(x)
@@ -472,17 +581,18 @@ def entropy_waypoint_selection(
     result = minimize(
     obj_func,
     initial_guess,
-    args=(actions, gt_states,  actions_entropy),
+    args=(actions, gt_states,  actions_entropy, w_indices),
     method='SLSQP',  # 'SLSQP'
     options={'disp': False},
     bounds=bounds,
     constraints=constraints,
     )
-    
     """
+    ##################### Differential Evolution #############################
+    # """
     result = differential_evolution(
         obj_func,  # 自定义目标函数
-        args=(actions, gt_states,  actions_entropy),
+        args=(actions, gt_states,  actions_entropy, w_indices),
         bounds=bounds,
         strategy='best1bin',  # 进化策略
         maxiter=10,         # 最大迭代次数
@@ -492,12 +602,9 @@ def entropy_waypoint_selection(
         disp=True             # 显示优化过程
     )
     # """
-    x = result.x
-    x = np.clip(x, 1, 1e6)
-    waypoints = (np.cumsum(x)-x[0])*(num_frames-1)/np.sum(x)
-    waypoints = np.round(waypoints).astype(int)    
+    _,waypoints = obj_func(result.x,actions, gt_states,  actions_entropy, w_indices,return_list=True )
     total_traj_err = result.fun
-    # 
+    
     
     # remove duplicates
     waypoints = list(set(waypoints))
@@ -517,6 +624,14 @@ def entropy_waypoint_selection(
     waypoints.append(num_frames-1)
     _,distance = distance_func(actions, gt_states, waypoints, return_list=True)
     return waypoints, distance
+
+
+def gripper_change_detect(actions, gt_states,err_threshold=0.01):
+    gripper_change_indices = []
+    for t in range(len(gt_states)-1):
+        if any(np.abs(gt_states[t+1,[6,13]]-gt_states[t,[6,13]]) > err_threshold):
+            gripper_change_indices.append(t)
+    return gripper_change_indices
 
 
 def dp_reconstruct_waypoint_selection(

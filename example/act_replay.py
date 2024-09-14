@@ -12,12 +12,12 @@ from einops import rearrange
 import wandb
 from act.constants import DT
 from act.constants import PUPPET_GRIPPER_JOINT_OPEN
-from act.act_utils import load_data  # data functions
+from act.act_utils import load_data, relabel_waypoints  # data functions
 from act.act_utils import sample_box_pose, sample_insertion_pose  # robot functions
 from act.act_utils import compute_dict_mean, set_seed, detach_dict  # helper functions
 from act.visualize_episodes import save_videos
 from act.sim_env import BOX_POSE,make_sim_env
-
+from act.act_utils import put_text
 import IPython
 
 e = IPython.embed
@@ -68,6 +68,7 @@ def main(args):
         "end_idx": args["end_idx"],
         "use_waypoint": args["use_waypoint"],
         "use_entropy_waypoint": args["use_entropy_waypoint"],
+        "use_constant_waypoint": args["use_constant_waypoint"]
     }
     is_eval = True
     if is_eval:
@@ -113,6 +114,16 @@ def get_image(ts, camera_names):
     curr_image = torch.from_numpy(curr_image / 255.0).float().cuda().unsqueeze(0)
     return curr_image
 
+def is_in_bottom_20_percent(lst, elem):
+    # 对列表进行排序
+    sorted_lst = sorted(lst)
+    
+    # 计算前80%的位置索引
+    bottom_20_index = int(len(sorted_lst)*0.3) # 1: 80% 0.8 0.5 0.3
+    
+    # 检查元素是否在后20%的范围内
+    return elem <= sorted_lst[bottom_20_index]
+
 def replay(config, ckpt_name, dataset, save_demos=False,save_episode=True):
     set_seed(1000)
     ckpt_dir = config["ckpt_dir"]
@@ -126,6 +137,7 @@ def replay(config, ckpt_name, dataset, save_demos=False,save_episode=True):
     end_idx = config["end_idx"]
     use_waypoint = config["use_waypoint"]
     use_entropy_waypoint = config["use_entropy_waypoint"]
+    use_constant_waypoint = config["use_constant_waypoint"]
     onscreen_cam = "angle"
     variance_step = 1
    
@@ -144,7 +156,7 @@ def replay(config, ckpt_name, dataset, save_demos=False,save_episode=True):
         env_max_reward = 0
     else:
         from act.sim_env import make_sim_env
-        from act.act_utils import put_text, plot_3d_trajectory
+        from act.act_utils import put_text, mark_3d_trajectory
 
         env = make_sim_env(task_name)
         env_max_reward = env.task.max_reward
@@ -155,18 +167,29 @@ def replay(config, ckpt_name, dataset, save_demos=False,save_episode=True):
     num_rollouts = end_idx-start_idx+1
     episode_returns = []
     highest_rewards = []
+    total_count = 0
     for rollout_id in range(start_idx, end_idx+1):
         rollout_id += 0
         dataset_path = os.path.join(dataset, f"episode_{rollout_id}.hdf5")
         with h5py.File(dataset_path, "r+") as root:
             all_qpos = root["/observations/qpos"][()]
             actions = root["/action"][()]
+            entropy = root["/entropy"][()]
+            waypoints = np.arange(0,len(actions))
             if use_waypoint:
                 waypoints = root["/waypoints"][()]
                 actions = np.array(actions)[waypoints]
+                entropy = np.array(entropy)[waypoints]
+                # actions = relabel_waypoints(actions, waypoints)
             elif use_entropy_waypoint:
-                entropy_waypoints = root["/entropy_waypoints"][()]
-                actions = np.array(actions)[entropy_waypoints]
+                waypoints = root["/entropy_waypoints"][()]
+                actions = np.array(actions)[waypoints]
+                entropy = np.array(entropy)[waypoints]
+            elif use_constant_waypoint:
+                waypoints = root["/constant_waypoints"][()]
+                actions = np.array(actions)[waypoints]
+                entropy = np.array(entropy)[waypoints]
+            gripper_indices = gripper_change_detect(actions,all_qpos)
             images = root["/observations/images/top"][()]
             BOX_POSE[0] = root["/init_box_pose"][()]
         max_timesteps = int(np.array(actions).shape[0])
@@ -176,7 +199,10 @@ def replay(config, ckpt_name, dataset, save_demos=False,save_episode=True):
         rewards = []
 
         ts = env.reset()
-
+        count = 0
+        last_flag = True
+        last_count = 0
+        mark_list = []
         with torch.inference_mode():
             for t in tqdm(range(max_timesteps)):
                 ### update onscreen render and wait for DT
@@ -196,8 +222,20 @@ def replay(config, ckpt_name, dataset, save_demos=False,save_episode=True):
                     
                 ### store processed image for video 
                 store_imgs = {}
+                key_flag =  is_in_bottom_20_percent(entropy,entropy[t]) # (t in gripper_indices) or
+                mark_list.append(key_flag)
                 for key, img in obs["images"].items():
-                    store_imgs[key] = img
+                    if t>0:
+                        text = waypoints[t]-waypoints[t-1]
+                        store_imgs[key] = put_text(img,np.concatenate(([text],[waypoints[t]])) )
+                        if key_flag is True and mark_list[-2] is False:
+                            store_imgs[key] = put_text(store_imgs[key],"******",is_waypoint=True,position="bottom")
+                        elif key_flag:
+                            store_imgs[key] = put_text(store_imgs[key],"*",position="bottom")
+                        # if t<max_timesteps-1:
+                        #      store_imgs[key] = put_text(store_imgs[key], all_qpos[t+1,[6,13]]-all_qpos[t,[6,13]],position="bottom")
+                    else:
+                        store_imgs[key] = img
                 if "images" in obs:
                     image_list.append(store_imgs)
                 else:
@@ -206,11 +244,59 @@ def replay(config, ckpt_name, dataset, save_demos=False,save_episode=True):
                 target_qpos = actions[t]
                 # TODO: Increase the end-effector force. Calculate delta, then increase the delta
                 # target_qpos[[6,13]] = 0.5*(actions[t,[6,13]]+all_qpos[t,[6,13]])
-                real_qpos = np.array(ts.observation["qpos"])[[6,13]]
-                gripper_delta = target_qpos[[6,13]]-real_qpos
+                
+                gripper_delta = target_qpos[[6,13]]-ts.observation["qpos"][[6,13]]
                 # target_qpos[[6,13]] += gripper_delta*0.5
+                non_gripper_idx = [0,1,2,3,4,5,7,8,9,11,12]
                 ### step the environment
                 ts = env.step(target_qpos)
+                # ts = env.step(target_qpos)
+                real_qpos = np.array(ts.observation["qpos"])
+                count+=1
+                if True: #is_in_bottom_20_percent(list(entropy),entropy[t]): 
+                    closeloop_count = 0
+                    # Consecutive two states don't have to be close-loop
+                    # TODO: consider smooth motions
+                    # Now can reach 75% 
+                    # TODO: try to change the close-loop to interpolation
+                    target_agent_qpos = target_qpos.copy()
+                    target_agent_qpos[[6,13]] = all_qpos[t,[6,13]]
+                    while  t>last_count+1 and closeloop_count<1 and np.linalg.norm(np.array(target_qpos-real_qpos)[non_gripper_idx],axis=-1)>0.05:
+                        ts = env.step(target_qpos)
+                        real_qpos = np.array(ts.observation["qpos"])
+                        obs = ts.observation
+                        qpos_numpy = np.array(obs["qpos"])
+                        qpos = pre_process(qpos_numpy)
+                        qpos = torch.from_numpy(qpos).float().cuda().unsqueeze(0)
+                        curr_image = get_image(ts, camera_names)
+                    
+                        ### store processed image for video 
+                        store_imgs = {}
+                        for key, img in obs["images"].items():
+                            if t>0:
+                                text = 0
+                                store_imgs[key] = put_text(img,np.concatenate(([text],[waypoints[t]])) )
+                                if key_flag:
+                                    store_imgs[key] = put_text(store_imgs[key],"*",position="bottom")
+                            else:
+                                store_imgs[key] = img
+                        if "images" in obs:
+                            image_list.append(store_imgs)
+                        else:
+                            image_list.append({"main": store_imgs})
+                        count+=1
+                        closeloop_count+=1
+                        # print(f"target-real:{target_qpos[non_gripper_idx]-real_qpos[non_gripper_idx]}")
+                        # print(count)
+                        # print(f"target:{target_qpos[non_gripper_idx]}|real:{real_qpos[non_gripper_idx]}")
+                        # print(f"target-real:{target_qpos[non_gripper_idx]-real_qpos[non_gripper_idx]}")
+                    if closeloop_count>0:
+                          last_count = t
+                          last_flag = False
+                    else:
+                        last_flag = True
+                else:
+                    last_flag = True
                 ### Compensate for the gripper delay
                 ### Assume we have a perfect gripper controller
                 
@@ -256,7 +342,7 @@ def replay(config, ckpt_name, dataset, save_demos=False,save_episode=True):
         ax1.set_ylim([min_y, max_y])
         ax1.set_zlim([min_z, max_z])
 
-        plot_3d_trajectory(ax1, left_arm_xyz, label="demos replay", legend=False)
+        mark_3d_trajectory(ax1, left_arm_xyz, mark_list,label="demos replay", legend=False)
 
         ax2 = fig.add_subplot(122, projection="3d")
         ax2.set_xlabel("x")
@@ -267,15 +353,15 @@ def replay(config, ckpt_name, dataset, save_demos=False,save_episode=True):
         ax2.set_ylim([min_y, max_y])
         ax2.set_zlim([min_z, max_z])
 
-        plot_3d_trajectory(ax2, right_arm_xyz,label="demos replay", legend=False)
+        mark_3d_trajectory(ax2, right_arm_xyz,mark_list,label="demos replay", legend=False)
         fig.suptitle(f"Task: {task_name}", fontsize=30) 
 
         handles, labels = ax1.get_legend_handles_labels()
         fig.legend(handles, labels, loc="lower center", ncol=2, fontsize=20)
         print(
-            f"Rollout {rollout_id}\n{episode_return=}, {episode_highest_reward=}, {env_max_reward=}, Success: {episode_highest_reward==env_max_reward}"
+            f"Rollout {rollout_id}\n{episode_return=}, {episode_highest_reward=}, {env_max_reward=}, Success: {episode_highest_reward==env_max_reward}, Episode length:{count}"
         )
-                
+        total_count+=count        
         # Only save successful video/plot
         if save_episode : # and episode_highest_reward==env_max_reward: 
             save_videos(
@@ -319,8 +405,9 @@ def replay(config, ckpt_name, dataset, save_demos=False,save_episode=True):
         more_or_equal_r = (np.array(highest_rewards) >= r).sum()
         more_or_equal_r_rate = more_or_equal_r / num_rollouts
         summary_str += f"Reward >= {r}: {more_or_equal_r}/{num_rollouts} = {more_or_equal_r_rate*100}%\n"
-
+    
     print(summary_str)
+    print(f"mean count: {total_count/(end_idx+1-start_idx)}")
     # save success rate to txt
     result_file_name = "result_" + ckpt_name.split(".")[0] + ".txt"
     with open(os.path.join(ckpt_dir, result_file_name), "w") as f:
@@ -331,14 +418,12 @@ def replay(config, ckpt_name, dataset, save_demos=False,save_episode=True):
     
     return success_rate, avg_return
 
-def reset_env(env, initial_state=None, remove_obj=False):
-    # load the initial state
-    if initial_state is not None:
-        env.reset_to(initial_state)
-
-    # remove the object from the scene
-    if remove_obj:
-        remove_object(env)
+def gripper_change_detect(actions, gt_states,err_threshold=0.01):
+    gripper_change_indices = []
+    for t in range(len(gt_states)-1):
+        if any(np.abs(gt_states[t+1,[6,13]]-gt_states[t,[6,13]]) > err_threshold):
+            gripper_change_indices.append(t)
+    return gripper_change_indices
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -369,6 +454,7 @@ if __name__ == "__main__":
     
     parser.add_argument("--use_waypoint", action="store_true")
     parser.add_argument("--use_entropy_waypoint", action="store_true")
+    parser.add_argument("--use_constant_waypoint", action="store_true")
     # for ACT
     parser.add_argument(
         "--kl_weight", action="store", type=int, help="KL Weight", required=False

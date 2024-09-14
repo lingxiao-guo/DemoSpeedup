@@ -94,7 +94,7 @@ class DETRVAE(nn.Module):
         self.transformer = transformer
         self.encoder = encoder
         hidden_dim = transformer.d_model
-        self.action_head = nn.Linear(hidden_dim, state_dim)
+        self.action_head = nn.Linear(hidden_dim, state_dim*2)
         self.state_dim = state_dim
         self.is_pad_head = nn.Linear(hidden_dim, 1)
         self.query_embed = nn.Embedding(num_queries, hidden_dim)
@@ -271,7 +271,7 @@ class DETRVAE(nn.Module):
                 transformer_input, None, self.query_embed.weight, self.pos.weight
             )[0]
         output = self.action_head(hs)
-        """output = output.reshape(num_z_samples, bs, -1,2*self.state_dim)
+        output = output.reshape(num_z_samples, bs, -1,2*self.state_dim)
         # a_hat_mean: (num_z_samples, bs, t, state_dim)
         a_hat_mean = output[:,:,:,:self.state_dim]
         a_hat = torch.mean(a_hat_mean, dim=0)
@@ -283,8 +283,8 @@ class DETRVAE(nn.Module):
         # a_samples: (num_a_samples_perz, num_z_samples, bs, t, state_dim)
         a_samples = reparametrize_n(a_hat_mean,a_std,num_a_samples_perz)
         a_samples = a_samples.reshape(num_a_samples_perz * num_z_samples, bs, -1, self.state_dim)
-        """
-        a_samples = output.reshape(num_z_samples, bs, -1, self.state_dim)
+        
+        # a_samples = output.reshape(num_z_samples, bs, -1, self.state_dim)
         # Calculate entropy from MC
         # a_samples_scale: (bs*t, samples, dim)
         # for k in range(num_z_samples):

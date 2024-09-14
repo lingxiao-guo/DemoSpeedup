@@ -72,7 +72,7 @@ def plot_3d_trajectory(ax, traj_list, actions_var_norm=None, distance=None, labe
                     c = mpl.cm.Oranges(0.2 + 0.5 * i / num_frames)
                 else:
                     # c = mpl.cm.Reds(0.5 + 0.5 * i / num_frames)
-                    c = mpl.cm.Reds(0.3)
+                    c = mpl.cm.Reds(0.5)
             else:
                 c = mpl.cm.Reds(np.clip((0.5-mark[i]),0,1))
         elif label == "gt" or label == "ground truth" or label == "demos replay":
@@ -82,7 +82,7 @@ def plot_3d_trajectory(ax, traj_list, actions_var_norm=None, distance=None, labe
                 else:
                     c = mpl.cm.Blues(0.5 + 0.5 * i / num_frames)
             else:
-                c = mpl.cm.Blues(np.clip((mark[i]),0,1))
+                c = mpl.cm.Blues(0.2+0.8*np.clip((0.5-mark[i]),0,1))
         else:
                 # c = mpl.cm.Greens(0.5 + 0.5 * i / num_frames)
                 c = mpl.cm.Reds(np.clip((0.5-mark[i]),0,1))
@@ -159,6 +159,85 @@ def plot_3d_trajectory(ax, traj_list, actions_var_norm=None, distance=None, labe
     # ax.w_yaxis.set_pane_color((173/255, 216/255, 230/255, 1.0))
     # ax.w_zaxis.set_pane_color((173/255, 216/255, 230/255, 1.0))
 
+
+def mark_3d_trajectory(ax, traj_list, mark_list, key_mark=None, label=None, gripper=None, legend=True, add=None):
+    """Plot a 3D trajectory."""
+    mark = None
+    l = label
+    num_frames = len(traj_list)
+    for i in range(num_frames):
+        # change the color if the gripper state changes
+        gripper_state_changed = (
+            gripper is not None and i > 0 and gripper[i] != gripper[i - 1]
+        )
+        if label == "pred" or label == "waypoints":
+                if gripper_state_changed or (add is not None and i in add):
+                    c = mpl.cm.Oranges(0.2 + 0.5 * i / num_frames)
+                else:
+                    # c = mpl.cm.Reds(0.5 + 0.5 * i / num_frames)
+                    c = mpl.cm.Reds(0.3)
+        else: 
+                if gripper_state_changed:
+                    c = mpl.cm.Greens(0.2 + 0.5 * i / num_frames)
+                else:
+                    c = mpl.cm.Blues(0.5 + 0.5 * int(mark_list[i]))
+
+        # change the marker if the gripper state changes
+        if gripper_state_changed:
+            if gripper[i] == 1:  # open
+                marker = "D"
+            else:  # close
+                marker = "s"
+        else:
+            marker = "o"
+
+        # plot the vector between the current and the previous point
+        if (label == "pred" or label == "action" or label == "waypoints") and i > 0:
+            v = traj_list[i] - traj_list[i - 1]
+            ax.quiver(
+                traj_list[i - 1][0],
+                traj_list[i - 1][1],
+                traj_list[i - 1][2],
+                v[0],
+                v[1],
+                v[2],
+                color="r",
+                alpha=0.5,
+                # linewidth=3,
+            )
+
+        # if label is waypoint, make the marker D, and slightly bigger
+        if i>0:
+            if mark_list[i]==True and mark_list[i-1]==False:
+                marker = "*"
+                ax.plot(
+                [traj_list[i][0]],
+                [traj_list[i][1]],
+                [traj_list[i][2]],
+                marker=marker,
+                label=l,
+                color="y",
+                markersize=10,
+                )
+            else:
+                v = traj_list[i] - traj_list[i - 1]
+                ax.quiver(
+                traj_list[i - 1][0],
+                traj_list[i - 1][1],
+                traj_list[i - 1][2],
+                v[0],
+                v[1],
+                v[2],
+                color=c,
+                alpha=0.5,
+                # linewidth=3,
+            )
+
+        
+        l = None
+
+    if legend:
+        ax.legend()
 
 class EpisodicDataset(torch.utils.data.Dataset):
     def __init__(

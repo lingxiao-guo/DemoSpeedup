@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 import pickle
 import torch
 
-from waypoint_extraction.extract_waypoints import dp_waypoint_selection, greedy_waypoint_selection, entropy_waypoint_selection
+from waypoint_extraction.extract_waypoints import optimize_waypoint_selection,dp_waypoint_selection, greedy_waypoint_selection, entropy_waypoint_selection,gripper_change_detect
 from act.policy import ACTPolicy, CNNMLPPolicy
 from act.visualize_episodes import save_videos
 from act.act_utils import set_seed
@@ -58,16 +58,17 @@ def main(args):
     """if not args.plot_3d:
         for ckpt_name in ckpt_names:
             entropy_list = label_entropy(args.dataset, num_rollouts, config, ckpt_name)
-            print(f"entropy list:{entropy_list[0].shape}")
-    """
+            print(f"entropy list:{entropy_list[0].shape}")"""
+    
     # load data
     for i in tqdm(range(args.start_idx, args.end_idx + 1)):
         dataset_path = os.path.join(args.dataset, f"episode_{i}.hdf5")
         with h5py.File(dataset_path, "r+") as root:
             qpos = root["/observations/qpos"][()]
             images = root["/observations/images/top"][()]
-            entropy = root["/entropy"]
-            variance = root["/variance"]
+            entropy = root["/entropy"][()]
+            variance = root["/variance"][()]
+            waypoints = root["/waypoints"][()]
             entropy = np.array(entropy)
             variance = np.array(variance)[:,None]
             if args.use_ee:
@@ -88,7 +89,7 @@ def main(args):
                 err_threshold=args.err_threshold,
                 pos_only=True,
             )
-            """
+            
             waypoints, distance = entropy_waypoint_selection(
                 env=None,
                 actions=qpos,
@@ -96,6 +97,15 @@ def main(args):
                 actions_entropy=entropy,
                 err_threshold=args.err_threshold,
                 pos_only=True,
+            )
+            """
+            waypoints, distance = optimize_waypoint_selection( # if it's too slow, use greedy_waypoint_selection
+                env=None,
+                actions=qpos,
+                gt_states=qpos,
+                err_threshold=args.err_threshold,
+                pos_only=True,
+                entropy=entropy,
             )
             
             print(
@@ -106,7 +116,7 @@ def main(args):
 
             # save waypoints
             if args.save_waypoints:
-                name = f"/entropy_waypoints"  # /entropy_waypoints
+                name = f"/waypoints"  # /entropy_waypoints
                 try:
                     root[name] = waypoints
                 except:
@@ -118,7 +128,11 @@ def main(args):
                         del root[name]
                         root[name] = waypoints
             
-            
+            gripper_indices = gripper_change_detect(qpos, qpos)
+            entropy[gripper_indices] = np.min(entropy)*0.99
+            mean = np.mean(entropy)
+            entropy[np.where(entropy>mean)[0]] = 5
+            entropy[np.where(entropy<mean)[0]] = 0.1
             # visualize ground truth qpos and waypoints
             if args.plot_3d:
                 if not args.use_ee:
@@ -148,7 +162,7 @@ def main(args):
                 
                 # from utils.utils import plot_3d_trajectory
                 from act.act_utils import plot_3d_trajectory
-                # plot_3d_trajectory(ax1, left_arm_xyz, actions_var_norm=distance, label="ground truth", legend=False)
+                plot_3d_trajectory(ax1, left_arm_xyz, entropy,label="gt", legend=False)
                 
                 ax2 = fig.add_subplot(122, projection="3d")
                 ax2.set_xlabel("x")
@@ -159,10 +173,9 @@ def main(args):
                 ax2.set_ylim([min_y, max_y])
                 ax2.set_zlim([min_z, max_z])
 
-                # plot_3d_trajectory(ax2, right_arm_xyz, actions_var_norm=distance, label="ground truth", legend=False)
+                plot_3d_trajectory(ax2, right_arm_xyz, entropy,label="gt", legend=False)
                 # prepend 0 to waypoints to include the initial state
                 waypoints = [0] + waypoints
-                """
                 plot_3d_trajectory(
                     ax1,
                     [left_arm_xyz[i] for i in waypoints],
@@ -176,8 +189,8 @@ def main(args):
                     legend=False,
                 )  # Plot waypoints for right_arm_xyz"""
                 
-                plot_3d_trajectory(ax1, left_arm_xyz, distance=distance, label="ground truth", legend=False)
-                plot_3d_trajectory(ax2, right_arm_xyz, distance=distance,  label="ground truth", legend=False)                
+                # plot_3d_trajectory(ax1, left_arm_xyz, distance=distance, label="ground truth", legend=False)
+                # plot_3d_trajectory(ax2, right_arm_xyz, distance=distance,  label="ground truth", legend=False)                
                 fig.suptitle(f"Task: {args.dataset.split('/')[-1]}", fontsize=30) 
 
                 handles, labels = ax1.get_legend_handles_labels()

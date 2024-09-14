@@ -673,7 +673,7 @@ def plot_history(train_history, validation_history, num_epochs, ckpt_dir, seed):
     print(f"Saved plots to {ckpt_dir}")
 
 def plot_trajectory_variance(config, ckpt_name, save_demos=False,save_episode=True):
-    set_seed(1)
+    set_seed(2)
     ckpt_dir = config["ckpt_dir"]
     state_dim = config["state_dim"]
     real_robot = config["real_robot"]
@@ -984,7 +984,7 @@ def plot_trajectory_variance(config, ckpt_name, save_demos=False,save_episode=Tr
             dataset["/variance"] = actions_var_norm[:,None]
             dataset["/marginal_entropy"] = actions_marginal_var_norm
             path = f"data/act_replay/{task_name}"
-            dataset_path = os.path.join(path, f"episode_{14+save_id}.hdf5")
+            dataset_path = os.path.join(path, f"episode_{23+save_id}.hdf5")
             print(f"Saving to {dataset_path}")
             save_id += 1
             with h5py.File(dataset_path, "w") as root:  # 使用 "w" 模式，创建新文件
