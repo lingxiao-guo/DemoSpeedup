@@ -162,7 +162,6 @@ def main(args):
                 
                 # from utils.utils import plot_3d_trajectory
                 from act.act_utils import plot_3d_trajectory
-                plot_3d_trajectory(ax1, left_arm_xyz, entropy,label="gt", legend=False)
                 
                 ax2 = fig.add_subplot(122, projection="3d")
                 ax2.set_xlabel("x")
@@ -173,7 +172,6 @@ def main(args):
                 ax2.set_ylim([min_y, max_y])
                 ax2.set_zlim([min_z, max_z])
 
-                plot_3d_trajectory(ax2, right_arm_xyz, entropy,label="gt", legend=False)
                 # prepend 0 to waypoints to include the initial state
                 waypoints = [0] + waypoints
                 plot_3d_trajectory(
@@ -188,6 +186,8 @@ def main(args):
                     label="waypoints",
                     legend=False,
                 )  # Plot waypoints for right_arm_xyz"""
+                plot_3d_trajectory(ax1, left_arm_xyz, label="gt", legend=False)
+                plot_3d_trajectory(ax2, right_arm_xyz, label="gt", legend=False)
                 
                 # plot_3d_trajectory(ax1, left_arm_xyz, distance=distance, label="ground truth", legend=False)
                 # plot_3d_trajectory(ax2, right_arm_xyz, distance=distance,  label="ground truth", legend=False)                

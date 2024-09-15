@@ -2,7 +2,7 @@
 import numpy as np
 from scipy.optimize import minimize, differential_evolution
 import copy
-
+from tqdm import tqdm
 from waypoint_extraction.traj_reconstruction import (
     pos_only_geometric_waypoint_trajectory,
     pos_only_geometric_entropy_trajectory,
@@ -11,6 +11,9 @@ from waypoint_extraction.traj_reconstruction import (
     geometric_waypoint_trajectory,
     geometric_entropy_trajectory,
     calculate_weights_from_entropy,
+    get_all_pos_only_geometric_distance,
+    get_all_pos_only_geometric_distance_gpu,
+    fast_pos_only_geometric_waypoint_trajectory
 )
 
 
@@ -222,7 +225,7 @@ def dp_waypoint_selection(
                 waypoints=waypoints,
                 return_list=True
             )
-            # this cause local pareto!
+
             if total_traj_err < err_threshold:
                 subproblem_waypoints_count, subproblem_waypoints = memo[k - 1]
                 total_waypoints_count = 1 + subproblem_waypoints_count
@@ -263,15 +266,14 @@ def optimize_waypoint_selection(
     num_frames = len(actions)
     entropy_weights = calculate_weights_from_entropy(entropy)
     gripper_change_indices = gripper_change_detect(actions,gt_states)
-    entropy_weights[gripper_change_indices] = np.min(entropy_weights)*1.1
-    print(np.max(entropy),np.min(entropy))
-    print(np.max(entropy_weights),np.min(entropy_weights))
-    # update err_threshold
+    # entropy_weights[gripper_change_indices] = np.min(entropy_weights)*1.1
+   
+    # update err_threshold with entropy
     all_err_threshold = []
     for i in range(len(entropy_weights)):
-        all_err_threshold.append(err_threshold*entropy_weights)
+        all_err_threshold.append(err_threshold*entropy_weights[i])
     all_err_threshold = np.array(all_err_threshold)
-    print(np.max(all_err_threshold))
+   
     # make the last frame a waypoint
     initial_waypoints = [num_frames - 1]
 
@@ -292,19 +294,14 @@ def optimize_waypoint_selection(
 
     memo[1] = (1, [1])
     func = (
-        pos_only_geometric_waypoint_trajectory
+        fast_pos_only_geometric_waypoint_trajectory
         if pos_only
         else geometric_waypoint_trajectory
-    )
-    
-    # Check if err_threshold is too small, then return all points as waypoints
-    min_error = func(actions, gt_states, list(range(1, num_frames)))
-    if err_threshold < min_error:
-        print("Error threshold is too small, returning all points as waypoints.")
-        return list(range(1, num_frames))
-
+    )   
+    all_distance = get_all_pos_only_geometric_distance_gpu(gt_states)
+    print("All distances calculated.")
     # Populate the memoization table using an iterative bottom-up approach
-    for i in range(1, num_frames):
+    for i in tqdm(range(1, num_frames)):
         min_waypoints_required = float("inf")
         best_waypoints = []
 
@@ -316,11 +313,11 @@ def optimize_waypoint_selection(
                 actions=actions[k : i + 1],
                 gt_states=gt_states[k : i + 1],
                 waypoints=waypoints,
+                all_distance=all_distance[k : i + 1,k : i + 1,k : i + 1],
                 return_list=True
             )
-            flag = np.min(np.array(all_traj_err)-all_err_threshold[k:i+1])<0
             # this cause local pareto!
-            if (np.array(all_traj_err)-all_err_threshold[k:i+1]).all():
+            if (np.array(all_traj_err)<all_err_threshold[k:i+1]).all():
                 subproblem_waypoints_count, subproblem_waypoints = memo[k - 1]
                 total_waypoints_count = 1 + subproblem_waypoints_count
 

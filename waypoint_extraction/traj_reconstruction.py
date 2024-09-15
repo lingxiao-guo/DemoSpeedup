@@ -133,6 +133,80 @@ def pos_only_geometric_waypoint_trajectory(
         else:
             return total_traj_err(state_err)
 
+def fast_pos_only_geometric_waypoint_trajectory(actions,gt_states,waypoints,all_distance,return_list=False):
+    if waypoints[0] != 0:
+        waypoints = [0] + waypoints
+    
+    state_err = []
+    n_segments = len(waypoints) - 1
+
+    for i in range(n_segments):
+        state_err.append(all_distance[waypoints[i]:(waypoints[i + 1]+1),waypoints[i],waypoints[i+1]])
+
+    return total_traj_err(state_err), state_err
+
+
+def get_all_pos_only_geometric_distance(gt_states):
+    """Compute the geometric trajectory from the waypoints"""
+    n = len(gt_states)
+    
+    # Expand dimensions for broadcasting
+    gt_states_i = gt_states[:, np.newaxis, np.newaxis, :]  # Shape: (n, 1, 1, d)
+    gt_states_j = gt_states[np.newaxis, :, np.newaxis, :]  # Shape: (1, n, 1, d)
+    gt_states_k = gt_states[np.newaxis, np.newaxis, :, :]  # Shape: (1, 1, n, d)
+    
+    # Calculate line vectors
+    line_vector = gt_states_k - gt_states_j  # Shape: (1, n, n, d)
+    point_vector = gt_states_i - gt_states_j  # Shape: (n, 1, n, d)
+    
+    # Calculate t values
+    t = np.sum(point_vector * line_vector, axis=-1) / (np.sum(line_vector * line_vector, axis=-1)+1e-8)
+    t = np.clip(t, 0, 1)
+    
+    # Calculate projections (1,n,n,d)
+    projection = gt_states_j + t[:, :, :, np.newaxis] * line_vector
+    
+    # Calculate distances
+    distances = np.linalg.norm(gt_states_i - projection, axis=-1)
+    # distance: (point, start, end)
+    return distances
+
+# Utilize GPU to accelerate calculation
+def get_all_pos_only_geometric_distance_gpu(gt_states):
+    """Compute the geometric trajectory from the waypoints using PyTorch"""
+    import torch
+    import os
+    os.environ["CUDA_VISIBLE_DEVICES"] = '7'
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if torch.cuda.is_available():
+        print("Accelerating calculation with GPU...")
+    gt_states = torch.tensor(gt_states, dtype=torch.float32, device=device)
+    n = gt_states.size(0)
+    d = gt_states.size(1)
+    
+    # Expand dimensions for broadcasting
+    gt_states_i = gt_states.unsqueeze(1).unsqueeze(2)  # Shape: (n, 1, 1, d)
+    gt_states_j = gt_states.unsqueeze(0).unsqueeze(2)  # Shape: (1, n, 1, d)
+    gt_states_k = gt_states.unsqueeze(0).unsqueeze(1)  # Shape: (1, 1, n, d)
+    
+    # Calculate line vectors
+    line_vector = gt_states_k - gt_states_j  # Shape: (1, n, n, d)
+    point_vector = gt_states_i - gt_states_j  # Shape: (n, n, 1, d)
+    
+    # Calculate t values
+    dot_product = torch.sum(point_vector * line_vector, dim=-1)
+    norm_line = torch.sum(line_vector * line_vector, dim=-1)+1e-8
+    t = dot_product / norm_line
+    t = torch.clamp(t, 0, 1)
+    
+    # Calculate projections
+    projection = gt_states_j + t.unsqueeze(-1) * line_vector
+    
+    # Calculate distances
+    distances = torch.norm(gt_states_i - projection, dim=-1)
+
+    return distances.cpu().numpy()
+
 def gripper_change_detect(actions, gt_states,err_threshold=0.012):
     gripper_change_indices = []
     for t in range(len(gt_states)-1):

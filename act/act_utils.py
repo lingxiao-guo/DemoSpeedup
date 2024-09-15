@@ -72,7 +72,7 @@ def plot_3d_trajectory(ax, traj_list, actions_var_norm=None, distance=None, labe
                     c = mpl.cm.Oranges(0.2 + 0.5 * i / num_frames)
                 else:
                     # c = mpl.cm.Reds(0.5 + 0.5 * i / num_frames)
-                    c = mpl.cm.Reds(0.5)
+                    c = mpl.cm.Reds(0.1)
             else:
                 c = mpl.cm.Reds(np.clip((0.5-mark[i]),0,1))
         elif label == "gt" or label == "ground truth" or label == "demos replay":
@@ -80,9 +80,9 @@ def plot_3d_trajectory(ax, traj_list, actions_var_norm=None, distance=None, labe
                 if gripper_state_changed:
                     c = mpl.cm.Greens(0.2 + 0.5 * i / num_frames)
                 else:
-                    c = mpl.cm.Blues(0.5 + 0.5 * i / num_frames)
+                    c = mpl.cm.Blues(0.9 + 0.1 * i / num_frames)
             else:
-                c = mpl.cm.Blues(0.2+0.8*np.clip((0.5-mark[i]),0,1))
+                c = mpl.cm.Blues(0.5+0.5*np.clip((0.5-mark[i]),0,1))
         else:
                 # c = mpl.cm.Greens(0.5 + 0.5 * i / num_frames)
                 c = mpl.cm.Reds(np.clip((0.5-mark[i]),0,1))
