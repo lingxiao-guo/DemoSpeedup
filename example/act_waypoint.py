@@ -116,7 +116,7 @@ def main(args):
 
             # save waypoints
             if args.save_waypoints:
-                name = f"/waypoints"  # /entropy_waypoints
+                name = f"/entropy_waypoints"  # /entropy_waypoints
                 try:
                     root[name] = waypoints
                 except:

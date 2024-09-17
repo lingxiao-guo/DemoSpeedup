@@ -137,12 +137,13 @@ def fast_pos_only_geometric_waypoint_trajectory(actions,gt_states,waypoints,all_
     if waypoints[0] != 0:
         waypoints = [0] + waypoints
     
-    state_err = []
+    state_err = np.empty(0, dtype=np.float32)
     n_segments = len(waypoints) - 1
+    if n_segments>0:
+        for i in range(n_segments):
+            state_err=np.concatenate((state_err,all_distance[waypoints[i]:waypoints[i + 1],waypoints[i],waypoints[i+1]]))
 
-    for i in range(n_segments):
-        state_err.append(all_distance[waypoints[i]:(waypoints[i + 1]+1),waypoints[i],waypoints[i+1]])
-
+    state_err=np.concatenate((state_err,np.zeros(1,dtype=np.float32)))  
     return total_traj_err(state_err), state_err
 
 
@@ -204,10 +205,9 @@ def get_all_pos_only_geometric_distance_gpu(gt_states):
     
     # Calculate distances
     distances = torch.norm(gt_states_i - projection, dim=-1)
-
     return distances.cpu().numpy()
 
-def gripper_change_detect(actions, gt_states,err_threshold=0.012):
+def gripper_change_detect(actions, gt_states,err_threshold=0.01):
     gripper_change_indices = []
     for t in range(len(gt_states)-1):
         if any(np.abs(gt_states[t+1,[6,13]]-gt_states[t,[6,13]]) > err_threshold):
@@ -275,7 +275,7 @@ def calculate_weights_from_entropy(actions_entropy, sigma=0.5):
     # entropy_weights = np.log(actions_entropy+1e-8)
     # entropy_weights = (entropy_weights - np.mean(entropy_weights))/np.var(entropy_weights)
     # entropy_weights = np.clip(0.5-0.5*actions_entropy/np.max(np.abs(actions_entropy)),0,1e6)*5
-    entropy_weights = np.exp(actions_entropy)
+    entropy_weights = np.exp(actions_entropy) # |2 0.001 55% 1.93|1 0.0012 60% 2.02 no gripper|
     len_ = actions_entropy.shape[0]
     # 分母后面应该用整个数据集统计到的，而不是每条demos的来确保一致性
     # entropy_weights = len_ * entropy_weights/np.sum(entropy_weights)

@@ -273,7 +273,11 @@ def optimize_waypoint_selection(
     for i in range(len(entropy_weights)):
         all_err_threshold.append(err_threshold*entropy_weights[i])
     all_err_threshold = np.array(all_err_threshold)
-   
+    
+    # Get acceleration
+    velocity = np.diff(gt_states,axis=0)
+    acceleration_scale = np.max(np.linalg.norm(np.diff(velocity,axis=0),axis=-1))
+    
     # make the last frame a waypoint
     initial_waypoints = [num_frames - 1]
 
@@ -301,14 +305,15 @@ def optimize_waypoint_selection(
     all_distance = get_all_pos_only_geometric_distance_gpu(gt_states)
     print("All distances calculated.")
     # Populate the memoization table using an iterative bottom-up approach
-    for i in tqdm(range(1, num_frames)):
+    for i in range(1, num_frames):
         min_waypoints_required = float("inf")
+        min_smooth = float("inf")
         best_waypoints = []
 
         for k in range(1, i):
             # waypoints are relative to the subsequence
             waypoints = [j - k for j in initial_waypoints if j >= k and j < i] + [i - k]
-
+            # print(waypoints) # i=1, k=1, w=[499]+[1-1]=[0]  i=2,k=1,w=[2-1]=[1],k=2,w=
             total_traj_err,all_traj_err = func(
                 actions=actions[k : i + 1],
                 gt_states=gt_states[k : i + 1],
@@ -317,15 +322,24 @@ def optimize_waypoint_selection(
                 return_list=True
             )
             # this cause local pareto!
-            if (np.array(all_traj_err)<all_err_threshold[k:i+1]).all():
-                subproblem_waypoints_count, subproblem_waypoints = memo[k - 1]
+            # TODO: add acceleration & rotation constraints!
+            # TODO: change the dp to each segment optimization
+            if (np.array(all_traj_err)<=all_err_threshold[k:i+1]).all():
+                subproblem_waypoints_count, subproblem_waypoints = memo[k]
                 total_waypoints_count = 1 + subproblem_waypoints_count
+                # calculate the acceleration:
+                candidate_waypoints = subproblem_waypoints + [i]
+                candidate_acceleration = get_acceleration(candidate_waypoints,gt_states)
+                velocity_var = np.var(np.diff(np.array(candidate_waypoints),axis=-1),axis=0)
+                if get_obj_func(total_waypoints_count,velocity_var,i) < get_obj_func(min_waypoints_required,min_smooth,i):
+                        min_waypoints_required = total_waypoints_count
+                        min_smooth = velocity_var
+                        best_waypoints = candidate_waypoints 
 
-                if total_waypoints_count < min_waypoints_required:
-                    min_waypoints_required = total_waypoints_count
-                    best_waypoints = subproblem_waypoints + [i]
-
-        memo[i] = (min_waypoints_required, best_waypoints)
+        
+        if min_waypoints_required < 1e6: 
+            # prevent the initial inf to be given to memo[i]
+            memo[i] = (min_waypoints_required, best_waypoints)
 
     min_waypoints_count, waypoints = memo[num_frames - 1]
     waypoints += initial_waypoints
@@ -339,6 +353,23 @@ def optimize_waypoint_selection(
     _,distance = pos_only_geometric_waypoint_trajectory(actions, gt_states, waypoints, return_list=True)
     return waypoints, distance
 
+def get_acceleration(waypoints,gt_states):
+    if len(gt_states)<3:
+        return 0
+    elif len(waypoints)<3:
+        waypoints = [0] + [1] + waypoints
+        waypoints = list(set(waypoints))
+    else:
+        if waypoints[0] != 0:
+            waypoints = [0] + waypoints
+    acceleration = np.mean(np.linalg.norm(np.diff(np.diff(gt_states[waypoints],axis=0),axis=0),axis=-1)) 
+    return acceleration
+
+def get_obj_func(waypoints_count, smooth, i, s_coeff=0.4): # 0.2
+    # 0*inf is nan  
+    obj_func =  waypoints_count/i + s_coeff*smooth
+    # print(f"w:{waypoints_count/i}|s:{s_coeff*smooth}")
+    return obj_func
 
 def preprocess_entropy(data):
     # log -> zscore

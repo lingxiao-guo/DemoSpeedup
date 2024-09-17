@@ -119,7 +119,7 @@ def is_in_bottom_20_percent(lst, elem):
     sorted_lst = sorted(lst)
     
     # 计算前80%的位置索引
-    bottom_20_index = int(len(sorted_lst)*0.3) # 1: 80% 0.8 0.5 0.3
+    bottom_20_index = int(len(sorted_lst)*0.4) # 1: 80% 0.8 0.5 0.3
     
     # 检查元素是否在后20%的范围内
     return elem <= sorted_lst[bottom_20_index]
@@ -186,7 +186,7 @@ def replay(config, ckpt_name, dataset, save_demos=False,save_episode=True):
                 actions = np.array(actions)[waypoints]
                 entropy = np.array(entropy)[waypoints]
             elif use_constant_waypoint:
-                waypoints = root["/constant_waypoints"][()]
+                waypoints = list(np.arange(0,len(actions)))[::2]
                 actions = np.array(actions)[waypoints]
                 entropy = np.array(entropy)[waypoints]
             gripper_indices = gripper_change_detect(actions,all_qpos)
@@ -222,7 +222,7 @@ def replay(config, ckpt_name, dataset, save_demos=False,save_episode=True):
                     
                 ### store processed image for video 
                 store_imgs = {}
-                key_flag =  is_in_bottom_20_percent(entropy,entropy[t]) # (t in gripper_indices) or
+                key_flag =  is_in_bottom_20_percent(entropy,entropy[t]) or (t in gripper_indices) 
                 mark_list.append(key_flag)
                 for key, img in obs["images"].items():
                     if t>0:
@@ -261,7 +261,7 @@ def replay(config, ckpt_name, dataset, save_demos=False,save_episode=True):
                     # TODO: try to change the close-loop to interpolation
                     target_agent_qpos = target_qpos.copy()
                     target_agent_qpos[[6,13]] = all_qpos[t,[6,13]]
-                    while  t>last_count+1 and closeloop_count<1 and np.linalg.norm(np.array(target_qpos-real_qpos)[non_gripper_idx],axis=-1)>0.05:
+                    while  t>last_count+1 and closeloop_count<2 and np.linalg.norm(np.array(target_qpos-real_qpos)[non_gripper_idx],axis=-1)>0.05:
                         ts = env.step(target_qpos)
                         real_qpos = np.array(ts.observation["qpos"])
                         obs = ts.observation
