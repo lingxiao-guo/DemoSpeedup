@@ -244,7 +244,7 @@ def dp_waypoint_selection(
     print(
         f"Minimum number of waypoints: {len(waypoints)} \tTrajectory Error: {total_traj_err}"
     )
-    print(f"waypoint positions: {waypoints}")
+    # print(f"waypoint positions: {waypoints}")
     _,distance = pos_only_geometric_waypoint_trajectory(actions, gt_states, waypoints, return_list=True)
     return waypoints, distance
 
@@ -262,7 +262,13 @@ def optimize_waypoint_selection(
         actions = copy.deepcopy(gt_states)
     elif gt_states is None:
         gt_states = copy.deepcopy(actions)
-        
+    
+    from act.convert_ee import get_ee
+    left_arm_ee = get_ee(actions[:, :6], actions[:, 6:7])
+    right_arm_ee = get_ee(actions[:, 7:13], actions[:, 13:14])
+    ee = np.concatenate([left_arm_ee[:,:6], right_arm_ee[:,:6]], axis=1)
+    
+    
     num_frames = len(actions)
     entropy_weights = calculate_weights_from_entropy(entropy)
     gripper_change_indices = gripper_change_detect(actions,gt_states)
@@ -308,8 +314,9 @@ def optimize_waypoint_selection(
     for i in range(1, num_frames):
         min_waypoints_required = float("inf")
         min_smooth = float("inf")
+        min_velocity = float("inf")
         best_waypoints = []
-
+        
         for k in range(1, i):
             # waypoints are relative to the subsequence
             waypoints = [j - k for j in initial_waypoints if j >= k and j < i] + [i - k]
@@ -329,11 +336,10 @@ def optimize_waypoint_selection(
                 total_waypoints_count = 1 + subproblem_waypoints_count
                 # calculate the acceleration:
                 candidate_waypoints = subproblem_waypoints + [i]
-                candidate_acceleration = get_acceleration(candidate_waypoints,gt_states)
-                velocity_var = np.var(np.diff(np.array(candidate_waypoints),axis=-1),axis=0)
-                if get_obj_func(total_waypoints_count,velocity_var,i) < get_obj_func(min_waypoints_required,min_smooth,i):
+                smooth = get_smooth(candidate_waypoints,gt_states)
+                if get_obj_func(total_waypoints_count,smooth,i) < get_obj_func(min_waypoints_required,min_smooth,i):
                         min_waypoints_required = total_waypoints_count
-                        min_smooth = velocity_var
+                        min_smooth = smooth
                         best_waypoints = candidate_waypoints 
 
         
@@ -346,11 +352,11 @@ def optimize_waypoint_selection(
     # remove duplicates
     waypoints = list(set(waypoints))
     waypoints.sort()
+    distance,_ = func(actions, gt_states, waypoints, all_distance)
     print(
-        f"Minimum number of waypoints: {len(waypoints)} \tTrajectory Error: {total_traj_err}"
+        f"Minimum number of waypoints: {len(waypoints)} \tTrajectory Error: {distance}"
     )
     print(f"waypoint positions: {waypoints}")
-    _,distance = pos_only_geometric_waypoint_trajectory(actions, gt_states, waypoints, return_list=True)
     return waypoints, distance
 
 def get_acceleration(waypoints,gt_states):
@@ -365,11 +371,34 @@ def get_acceleration(waypoints,gt_states):
     acceleration = np.mean(np.linalg.norm(np.diff(np.diff(gt_states[waypoints],axis=0),axis=0),axis=-1)) 
     return acceleration
 
-def get_obj_func(waypoints_count, smooth, i, s_coeff=0.4): # 0.2
-    # 0*inf is nan  
-    obj_func =  waypoints_count/i + s_coeff*smooth
-    # print(f"w:{waypoints_count/i}|s:{s_coeff*smooth}")
+def get_obj_func(waypoints_count, smooth,i, s_coeff=0.2): # 0.2
+    # 0*inf is nan 
+    obj_func =  waypoints_count/i + s_coeff*smooth 
     return obj_func
+"""
+def get_smooth(waypoints, gt_states,window_size=10):
+    waypoints = gt_states[waypoints]
+    waypoints = np.asarray(np.diff(waypoints,axis=0))  # 转换为 numpy 数组
+    n = len(waypoints)
+    rms_values = []  # 存储每个点的局部 RMS
+
+    # 计算局部 RMS
+    for i in range(n):
+        start = max(0, i - window_size)
+        end = min(n, i + window_size + 1)
+        window = waypoints[start:end]
+        if len(window) > 0:
+            rms = np.sqrt(np.mean(np.linalg.norm(window - waypoints[i],axis=-1)))
+            rms_values.append(rms)
+
+    # 如果没有有效的 RMS 值，则返回 0，否则返回 RMS 值的平均
+    return np.mean(rms_values) if rms_values else 0
+"""
+def get_smooth(waypoints, gt_states):
+    waypoints = [0] + waypoints
+    waypoints = np.diff(waypoints)  
+    smooth = np.var(waypoints)
+    return smooth
 
 def preprocess_entropy(data):
     # log -> zscore

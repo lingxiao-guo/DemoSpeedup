@@ -2,6 +2,8 @@ import torch
 import numpy as np
 import os
 os.environ['MUJOCO_GL'] = 'osmesa'
+os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
+os.environ["CUDA_VISIBLE_DEVICES"] = '6'
 import pickle
 import h5py
 import argparse
@@ -16,9 +18,12 @@ from act.act_utils import load_data  # data functions
 from act.act_utils import sample_box_pose, sample_insertion_pose  # robot functions
 from act.act_utils import compute_dict_mean, set_seed, detach_dict  # helper functions
 from act.policy import ACTPolicy, CNNMLPPolicy
+from act.detr.models.entropy_utils import KDE
 from act.visualize_episodes import save_videos
 from act.sim_env import BOX_POSE,make_sim_env
-
+import sys 
+sys.path.append("..") 
+from waypoint_extraction.extract_waypoints import optimize_waypoint_selection
 import IPython
 
 e = IPython.embed
@@ -109,13 +114,22 @@ def main(args):
         "camera_names": camera_names,
         "real_robot": not is_sim,
     }
+    dataset_path = os.path.join(dataset_dir, f"episode_0.hdf5")
+    with h5py.File(dataset_path, "r") as root:
+            entropy_var = root["/entropy_var"][()]
+            entropy_mean = root["/entropy_mean"][()]
+            entropy_min = root["/min_entropy"][()]
+            entropy_max = root["/max_entropy"][()]
+            entropy_var = torch.from_numpy(np.array(entropy_var)).float().cuda().unsqueeze(0)
+            entropy_mean = torch.from_numpy(np.array(entropy_mean)).float().cuda().unsqueeze(0)
+    H_dict = {"mean":entropy_mean,"var":entropy_var,"max":entropy_max,"min":entropy_min}
 
     if is_eval:
         ckpt_names = [f"policy_last.ckpt"]
         results = []
         for ckpt_name in ckpt_names:
             # success_rate, avg_return = plot_trajectory_variance(config, ckpt_name, args["save_demos"],save_episode=True)
-            success_rate, avg_return = eval_bc(config, ckpt_name, save_episode=True)
+            success_rate, avg_return = eval_bc(config, ckpt_name, H_dict,save_episode=True)
             results.append([ckpt_name, success_rate, avg_return])
 
         for ckpt_name, success_rate, avg_return in results:
@@ -190,9 +204,9 @@ def get_image(ts, camera_names):
     curr_image = torch.from_numpy(curr_image / 255.0).float().cuda().unsqueeze(0)
     return curr_image
 
-
-def eval_bc(config, ckpt_name, save_episode=True):
-    set_seed(1000)
+KDE = KDE()
+def eval_bc(config, ckpt_name, H_dict,save_episode=True):
+    set_seed(2)
     ckpt_dir = config["ckpt_dir"]
     state_dim = config["state_dim"]
     real_robot = config["real_robot"]
@@ -204,7 +218,7 @@ def eval_bc(config, ckpt_name, save_episode=True):
     task_name = config["task_name"]
     temporal_agg = config["temporal_agg"]
     onscreen_cam = "angle"
-
+   
     # load policy and stats
     ckpt_path = os.path.join(ckpt_dir, ckpt_name)
     policy = make_policy(policy_class, policy_config)
@@ -233,12 +247,13 @@ def eval_bc(config, ckpt_name, save_episode=True):
         env_max_reward = env.task.max_reward
 
     query_frequency = policy_config["num_queries"]
+    # query_frequency = 25
     if temporal_agg:
         query_frequency = 1
         num_queries = policy_config["num_queries"]
 
     max_timesteps = int(max_timesteps * 1)  # may increase for real-world tasks
-
+    #max_timesteps = 250
     num_rollouts = 50
     episode_returns = []
     highest_rewards = []
@@ -264,12 +279,20 @@ def eval_bc(config, ckpt_name, save_episode=True):
             all_time_actions = torch.zeros(
                 [max_timesteps, max_timesteps + num_queries, state_dim]
             ).cuda()
-
+            all_time_samples = torch.zeros(
+                [max_timesteps, max_timesteps + num_queries, 10,state_dim]
+            ).cuda()
+ 
         qpos_history = torch.zeros((1, max_timesteps, state_dim)).cuda()
         image_list = []  # for visualization
         qpos_list = []
         target_qpos_list = []
         rewards = []
+        traj_action_entropy = []
+        flag = False
+        waypoint_count = 0
+        openloop_t = 0
+        last_t = 0
         with torch.inference_mode():
             for t in tqdm(range(max_timesteps)):
                 ### update onscreen render and wait for DT
@@ -296,14 +319,65 @@ def eval_bc(config, ckpt_name, save_episode=True):
                 if config["policy_class"] == "ACT":
                     if t % query_frequency == 0:
                         all_actions = policy(qpos, curr_image)
+                        # get entropy
+                        action_samples,_,action_trust = policy.get_entropy(qpos, curr_image)
+                        action_samples = action_samples.squeeze().permute(1,0,2)
+                        # all_actions = action_samples[:,-1].reshape(all_actions.shape)
+                        # entropy = (entropy-H_dict["min"])/(H_dict["max"]-H_dict["min"])
+                        # all_actions = action_trust if weights >0 else all_actions
+                        # get waypoints using entropy and actions
+                        """waypoints, _ = optimize_waypoint_selection( # if it's too slow, use greedy_waypoint_selection
+                            env=None,
+                            actions=all_actions.squeeze().cpu().numpy(),
+                            gt_states=all_actions.squeeze().cpu().numpy(),
+                            err_threshold=0.002,
+                            pos_only=True,
+                            entropy=entropy.squeeze().cpu().numpy(),
+                        )
+                        # sample actions from waypoints
+                        all_actions = all_actions[:,waypoints] 
+                        waypoint_count = len(waypoints)
+                        openloop_t = 0 # """
                     if temporal_agg:
                         all_time_actions[[t], t : t + num_queries] = all_actions
                         actions_for_curr_step = all_time_actions[:, t]
                         actions_populated = torch.all(
                             actions_for_curr_step != 0, axis=1
                         )
+                        all_time_samples[[t], t : t + num_queries] = action_samples
+
+                        actions_for_next_step = all_time_actions[:, t+10]
+                        samples_populated = torch.all(
+                            actions_for_next_step != 0, axis=1
+                        )
+                        samples_for_curr_step = all_time_samples[:, t]
+                        samples_for_curr_step = samples_for_curr_step[samples_populated]
+
+                        entropy = torch.mean(torch.var(samples_for_curr_step.flatten(0,1),dim=0),dim=-1)
+                        entropy = (entropy-H_dict["min"])/(H_dict["max"]-H_dict["min"])
+                        traj_action_entropy.append(entropy.squeeze())
+                        weights = torch.clip(0.2-0.2*entropy.squeeze(),0,0.2)  # weights: 80%: 0 20% 0~1
+                        # weights = 1 if weights >0 else 0
+                        weights = weights.cpu().numpy()
+                        k = 0.01 # *np.exp(10*weights)  # k: 0.01~0.2
+                        # Or simply mask the past 10 th k
+                        # print(k)
+
+                        """if t>50 and weights >0:
+                            if flag:
+                                all_time_actions[0:max(t-10,0),:,:] = 0
+                                # flag = False
+                            k = 0.01
+                            all_time_actions[[t], t : t + num_queries] = all_actions
+                            actions_for_curr_step = all_time_actions[:, t]
+                            actions_populated = torch.all(
+                                actions_for_curr_step != 0, axis=1
+                            )"""
+                        # else:
+                        #     flag = True
+                            
                         actions_for_curr_step = actions_for_curr_step[actions_populated]
-                        k = 0.01
+                        # k = 0.01 
                         exp_weights = np.exp(-k * np.arange(len(actions_for_curr_step)))
                         exp_weights = exp_weights / exp_weights.sum()
                         exp_weights = (
@@ -314,11 +388,14 @@ def eval_bc(config, ckpt_name, save_episode=True):
                         )
                     else:
                         raw_action = all_actions[:, t % query_frequency]
+                        # raw_action = all_actions[:, openloop_t]
+                        # openloop_t += 1
+
                 elif config["policy_class"] == "CNNMLP":
                     raw_action = policy(qpos, curr_image)
                 else:
                     raise NotImplementedError
-
+                
                 ### post-process actions
                 raw_action = raw_action.squeeze(0).cpu().numpy()
                 action = post_process(raw_action)
@@ -326,11 +403,19 @@ def eval_bc(config, ckpt_name, save_episode=True):
 
                 ### step the environment
                 ts = env.step(target_qpos)
-
-                ### for visualization
                 qpos_list.append(qpos_numpy)
                 target_qpos_list.append(target_qpos)
                 rewards.append(ts.reward)
+                """if t>50 and weights>0:
+                    if flag:
+                        innerloop_count = 0
+                        non_gripper_idx = [0,1,2,3,4,5,7,8,9,11,12]
+                        while np.linalg.norm((target_qpos-np.array(ts.observation["qpos"]))[non_gripper_idx],axis=-1)>0.02 and innerloop_count<2:
+                            ts = env.step(target_qpos)
+                            innerloop_count += 1
+                        flag = False
+                else:
+                    flag = True"""
 
             plt.close()
         if real_robot:
@@ -349,12 +434,60 @@ def eval_bc(config, ckpt_name, save_episode=True):
         print(
             f"Rollout {rollout_id}\n{episode_return=}, {episode_highest_reward=}, {env_max_reward=}, Success: {episode_highest_reward==env_max_reward}"
         )
+        
+        traj_action_entropy = torch.stack(traj_action_entropy)
+        traj_action_entropy = np.array(traj_action_entropy.cpu())
 
+        qpos = np.array(qpos_list)  # ts, dim
+        from act.convert_ee import get_xyz
+
+        left_arm_xyz = get_xyz(qpos[:, :6])
+        right_arm_xyz = get_xyz(qpos[:, 7:13])
+        # Find global min and max for each axis
+        all_data = np.concatenate([left_arm_xyz, right_arm_xyz], axis=0)
+        min_x, min_y, min_z = np.min(all_data, axis=0)
+        max_x, max_y, max_z = np.max(all_data, axis=0)
+
+        fig = plt.figure(figsize=(20, 10))
+        ax1 = fig.add_subplot(121, projection="3d") 
+        ax1.set_xlabel("x")
+        ax1.set_ylabel("y")
+        ax1.set_zlabel("z")
+        ax1.set_title("Left", fontsize=20)
+        ax1.set_xlim([min_x, max_x])
+        ax1.set_ylim([min_y, max_y])
+        ax1.set_zlim([min_z, max_z])
+        from act.act_utils import plot_3d_trajectory
+        plot_3d_trajectory(ax1, left_arm_xyz, traj_action_entropy,label="policy rollout", legend=False)
+
+        ax2 = fig.add_subplot(122, projection="3d")
+        ax2.set_xlabel("x")
+        ax2.set_ylabel("y")
+        ax2.set_zlabel("z")
+        ax2.set_title("Right", fontsize=20)
+        ax2.set_xlim([min_x, max_x])
+        ax2.set_ylim([min_y, max_y])
+        ax2.set_zlim([min_z, max_z])
+
+        plot_3d_trajectory(ax2, right_arm_xyz, traj_action_entropy,label="policy rollout", legend=False)
+        fig.suptitle(f"Task: {task_name}", fontsize=30) 
+
+        handles, labels = ax1.get_legend_handles_labels()
+        fig.legend(handles, labels, loc="lower center", ncol=2, fontsize=20)
+        
         if save_episode:
             save_videos(
                 image_list,
                 DT,
                 video_path=os.path.join(ckpt_dir, f"video/video{rollout_id}.mp4"),
+            )
+            fig.savefig(
+                os.path.join(ckpt_dir, f"plot/rollout{rollout_id}.png")
+            )
+            ax1.view_init(elev=90, azim=45)
+            ax2.view_init(elev=90, azim=45)
+            fig.savefig(
+                os.path.join(ckpt_dir, f"plot/rollout{rollout_id}_view.png")
             )
         
         n_groups = qpos_numpy.shape[-1]
@@ -370,9 +503,9 @@ def eval_bc(config, ckpt_name, save_episode=True):
         plt.xlabel('timestep')
         plt.ylabel('qpos')
         plt.tight_layout()
-        fig.savefig(
-                os.path.join(ckpt_dir, f"plot/rollout{rollout_id}_qpos.png")
-            )
+        # fig.savefig(
+        #         os.path.join(ckpt_dir, f"plot/rollout{rollout_id}_qpos.png")
+        #     )
         print(f"Save qpos curve to {ckpt_dir}/plot/rollout{rollout_id}_qpos.png")
         
 
@@ -401,8 +534,8 @@ def forward_pass(data, policy):
     image_data, qpos_data, action_data, is_pad = data
     image_data, qpos_data, action_data, is_pad = (
         image_data.cuda(),
-        qpos_data.cuda(),
-        action_data.cuda(),
+        qpos_data.cuda().to(torch.float32),
+        action_data.cuda().to(torch.float32),
         is_pad.cuda(),
     )
     return policy(qpos_data, image_data, action_data, is_pad)  # TODO remove None
@@ -623,7 +756,7 @@ def train_bc(train_dataloader, val_dataloader, config,stats):
             summary_string += f"{k}: {v.item():.3f} "
         
 
-        if epoch % 400 == 0 and epoch !=0:
+        if epoch % 1000 == 0 and epoch !=0:
             ckpt_path = os.path.join(ckpt_dir, f"policy_epoch_{epoch}_seed_{seed}.ckpt")
             torch.save(policy.state_dict(), ckpt_path)
             plot_history(train_history, validation_history, epoch, ckpt_dir, seed)
@@ -721,7 +854,7 @@ def plot_trajectory_variance(config, ckpt_name, save_demos=False,save_episode=Tr
 
     max_timesteps = int(max_timesteps * 1)  # may increase for real-world tasks
 
-    num_rollouts = 200
+    num_rollouts = 50
     episode_returns = []
     highest_rewards = []
     save_id = 0
@@ -794,7 +927,7 @@ def plot_trajectory_variance(config, ckpt_name, save_demos=False,save_episode=Tr
                         #     all_actions = policy(qpos, curr_image)
                         #     action_samples.append(all_actions)
                         # action_samples = torch.stack(action_samples)
-                        action_samples = all_actions
+                        action_samples = all_actions.squeeze()
                         all_actions = torch.mean(action_samples, dim=0)
                         # left_actions_var = torch.var(action_samples[:,:,:variance_step,:].reshape(num_samples,-1), dim=0)
                         # right_actions_var = torch.var(action_samples[:,:,:variance_step,:].reshape(num_samples,-1), dim=0)
@@ -817,7 +950,7 @@ def plot_trajectory_variance(config, ckpt_name, save_demos=False,save_episode=Tr
                         action_var_curr_step = action_var_curr_step[actions_populated]
                         action_entropy_curr_step = action_entropy_curr_step[actions_populated]
                         action_marginal_entropy_curr_step = action_marginal_entropy_curr_step[actions_populated]
-                        k = 0.01
+                        k = 0.2
                         exp_weights = np.exp(-k * np.arange(len(actions_for_curr_step)))
                         exp_weights = exp_weights / exp_weights.sum()
                         exp_weights = (

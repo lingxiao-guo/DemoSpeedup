@@ -119,7 +119,7 @@ def is_in_bottom_20_percent(lst, elem):
     sorted_lst = sorted(lst)
     
     # 计算前80%的位置索引
-    bottom_20_index = int(len(sorted_lst)*0.4) # 1: 80% 0.8 0.5 0.3
+    bottom_20_index = int(len(sorted_lst)*0.5) # 1: 80% 0.8 0.5 0.3
     
     # 检查元素是否在后20%的范围内
     return elem <= sorted_lst[bottom_20_index]
@@ -182,14 +182,30 @@ def replay(config, ckpt_name, dataset, save_demos=False,save_episode=True):
                 entropy = np.array(entropy)[waypoints]
                 # actions = relabel_waypoints(actions, waypoints)
             elif use_entropy_waypoint:
-                waypoints = root["/entropy_waypoints"][()]
+                waypoints = root["/entropy_waypoints"][()] # /entropy_waypoints
                 actions = np.array(actions)[waypoints]
                 entropy = np.array(entropy)[waypoints]
             elif use_constant_waypoint:
-                waypoints = list(np.arange(0,len(actions)))[::2]
+                k = 175
+                num_frames = len(actions)
+                x = (num_frames-1)/k * np.ones((k)) 
+                x = np.clip(x, 1/10, 1e6)
+                waypoints = (np.cumsum(x)-x[0])*(len(actions)-1)/np.sum(x)
+                waypoints = np.round(waypoints).astype(int)
+                waypoints = list(waypoints)
+                # waypoints = list(np.arange(0,len(actions)))[::2]
                 actions = np.array(actions)[waypoints]
                 entropy = np.array(entropy)[waypoints]
             gripper_indices = gripper_change_detect(actions,all_qpos)
+            from act.convert_ee import get_ee
+            left_arm_ee = get_ee(actions[:, :6], actions[:, 6:7])
+            right_arm_ee = get_ee(actions[:, 7:13], actions[:, 13:14])
+            left_arm_ee_v = np.linalg.norm(np.diff(left_arm_ee[:,:6],axis=0),axis=-1)
+            right_arm_ee_v = np.linalg.norm(np.diff(right_arm_ee[:,:6],axis=0),axis=-1)
+            ee = np.concatenate([left_arm_ee, right_arm_ee], axis=-1)
+            ee_v = np.concatenate([left_arm_ee_v[:,None], right_arm_ee_v[:,None]], axis=-1)
+            ee_v = np.max(ee_v, axis=-1)
+            ee_v = np.concatenate((np.zeros(1,),ee_v),axis=0)
             images = root["/observations/images/top"][()]
             BOX_POSE[0] = root["/init_box_pose"][()]
         max_timesteps = int(np.array(actions).shape[0])
@@ -246,14 +262,16 @@ def replay(config, ckpt_name, dataset, save_demos=False,save_episode=True):
                 # target_qpos[[6,13]] = 0.5*(actions[t,[6,13]]+all_qpos[t,[6,13]])
                 
                 gripper_delta = target_qpos[[6,13]]-ts.observation["qpos"][[6,13]]
-                # target_qpos[[6,13]] += gripper_delta*0.5
+                # if vroll[t] > 0.05:
+                # if (np.abs(ee[t,10])>0.5):     # close
+                #     target_qpos[[6,13]] += gripper_delta*0.5
                 non_gripper_idx = [0,1,2,3,4,5,7,8,9,11,12]
                 ### step the environment
                 ts = env.step(target_qpos)
                 # ts = env.step(target_qpos)
                 real_qpos = np.array(ts.observation["qpos"])
                 count+=1
-                if True: #is_in_bottom_20_percent(list(entropy),entropy[t]): 
+                if  False: #key_flag: #is_in_bottom_20_percent(list(entropy),entropy[t]): 
                     closeloop_count = 0
                     # Consecutive two states don't have to be close-loop
                     # TODO: consider smooth motions
@@ -261,7 +279,10 @@ def replay(config, ckpt_name, dataset, save_demos=False,save_episode=True):
                     # TODO: try to change the close-loop to interpolation
                     target_agent_qpos = target_qpos.copy()
                     target_agent_qpos[[6,13]] = all_qpos[t,[6,13]]
-                    while  t>last_count+1 and closeloop_count<2 and np.linalg.norm(np.array(target_qpos-real_qpos)[non_gripper_idx],axis=-1)>0.05:
+                    while  t>last_count+1 and closeloop_count<2 and np.linalg.norm(np.array(actions[t]-real_qpos)[non_gripper_idx],axis=-1)>0.05:
+                        qpos_list.append(qpos_numpy)   
+                        # target_qpos = (target_qpos+(closeloop_count+1)*actions[t+1])/(closeloop_count+2)
+                        target_qpos_list.append(target_qpos)
                         ts = env.step(target_qpos)
                         real_qpos = np.array(ts.observation["qpos"])
                         obs = ts.observation
@@ -269,7 +290,6 @@ def replay(config, ckpt_name, dataset, save_demos=False,save_episode=True):
                         qpos = pre_process(qpos_numpy)
                         qpos = torch.from_numpy(qpos).float().cuda().unsqueeze(0)
                         curr_image = get_image(ts, camera_names)
-                    
                         ### store processed image for video 
                         store_imgs = {}
                         for key, img in obs["images"].items():
@@ -324,7 +344,7 @@ def replay(config, ckpt_name, dataset, save_demos=False,save_episode=True):
         # draw trajectory curves
         qpos = np.array(qpos_list)  # ts, dim
         from act.convert_ee import get_xyz
-
+     
         left_arm_xyz = get_xyz(qpos[:, :6])
         right_arm_xyz = get_xyz(qpos[:, 7:13])
         # Find global min and max for each axis
@@ -342,7 +362,7 @@ def replay(config, ckpt_name, dataset, save_demos=False,save_episode=True):
         ax1.set_ylim([min_y, max_y])
         ax1.set_zlim([min_z, max_z])
 
-        mark_3d_trajectory(ax1, left_arm_xyz, mark_list,label="demos replay", legend=False)
+        # mark_3d_trajectory(ax1, left_arm_xyz, mark_list,label="demos replay", legend=False)
 
         ax2 = fig.add_subplot(122, projection="3d")
         ax2.set_xlabel("x")
@@ -353,7 +373,7 @@ def replay(config, ckpt_name, dataset, save_demos=False,save_episode=True):
         ax2.set_ylim([min_y, max_y])
         ax2.set_zlim([min_z, max_z])
 
-        mark_3d_trajectory(ax2, right_arm_xyz,mark_list,label="demos replay", legend=False)
+        # mark_3d_trajectory(ax2, right_arm_xyz,mark_list,label="demos replay", legend=False)
         fig.suptitle(f"Task: {task_name}", fontsize=30) 
 
         handles, labels = ax1.get_legend_handles_labels()
@@ -379,12 +399,11 @@ def replay(config, ckpt_name, dataset, save_demos=False,save_episode=True):
             )
         plt.close(fig)
         n_groups = qpos_numpy.shape[-1]
-        tstep = np.linspace(0, 1, max_timesteps-1) 
+        tstep = np.linspace(0, 1, len(qpos_list)-1) 
         fig, axes = plt.subplots(nrows=n_groups, ncols=1, figsize=(8, 2 * n_groups), sharex=True)
-
         for n, ax in enumerate(axes):
             ax.plot(tstep, np.array(qpos_list)[1:, n], label=f'real qpos {n}')
-            ax.plot(tstep, np.array(target_qpos_list)[:-1, n], label=f'target qpos {n}')
+            ax.plot(tstep, np.array(target_qpos_list)[1:, n], label=f'target qpos {n}')
             ax.set_title(f'qpos {n}')
             ax.legend()
 
@@ -394,8 +413,33 @@ def replay(config, ckpt_name, dataset, save_demos=False,save_episode=True):
         fig.savefig(
                 os.path.join(dataset, f"plot/rollout{rollout_id}_qpos.png")
             )
-        print(f"Save qpos curve to {dataset}/plot/rollout{rollout_id}_qpos.png")    
+        print(f"Save qpos curve to {dataset}/plot/rollout{rollout_id}_qpos.png")  
         plt.close(fig)
+        if True: # use_ee:
+            fig, axes = plt.subplots(nrows=n_groups, ncols=1, figsize=(8, 2 * n_groups), sharex=True)
+            from act.convert_ee import get_ee
+            qpos = np.array(target_qpos_list)
+            tstep = np.linspace(0, 1, len(target_qpos_list)-1) 
+            left_arm_ee = get_ee(qpos[:, :6], qpos[:, 6:7])
+            right_arm_ee = get_ee(qpos[:, 7:13], qpos[:, 13:14])
+            qpos_list = np.concatenate([left_arm_ee, right_arm_ee], axis=1)
+            target_qpos_list = np.concatenate([left_arm_ee, right_arm_ee], axis=1)
+
+            left_arm_ee_v = np.linalg.norm(np.diff(left_arm_ee[:,:6],axis=0),axis=-1)
+            right_arm_ee_v = np.linalg.norm(np.diff(right_arm_ee[:,:6],axis=0),axis=-1)
+            ee_v = np.concatenate([left_arm_ee_v[:,None], right_arm_ee_v[:,None]], axis=-1)
+            ee_v = np.max(ee_v, axis=-1)
+
+            for n, ax in enumerate(axes):
+                ax.plot(tstep, np.array(ee_v), label=f'real qpos {n}')
+                ax.plot(tstep, np.array(ee_v), label=f'target qpos {n}')
+                ax.set_title(f'ee {n}')
+                ax.legend()  
+            fig.savefig(
+                os.path.join(dataset, f"plot/rollout{rollout_id}_eepos.png")
+            )
+            print(f"Save qpos curve to {dataset}/plot/rollout{rollout_id}_eepos.png")  
+        
         
 
     success_rate = np.mean(np.array(highest_rewards) == env_max_reward)

@@ -139,6 +139,8 @@ def get_args_parser():
     parser.add_argument("--save_demos", default=False, action="store_true")
     parser.add_argument("--temporal_agg", action="store_true")
     parser.add_argument("--use_waypoint", action="store_true")
+    parser.add_argument("--use_entropy_waypoint", action="store_true")
+    parser.add_argument("--use_constant_waypoint", action="store_true")
     parser.add_argument(
         "--constant_waypoint",
         action="store",

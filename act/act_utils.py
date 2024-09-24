@@ -85,7 +85,7 @@ def plot_3d_trajectory(ax, traj_list, actions_var_norm=None, distance=None, labe
                 c = mpl.cm.Blues(0.5+0.5*np.clip((0.5-mark[i]),0,1))
         else:
                 # c = mpl.cm.Greens(0.5 + 0.5 * i / num_frames)
-                c = mpl.cm.Reds(np.clip((0.5-mark[i]),0,1))
+                c = mpl.cm.Reds(np.clip((0.5-0.8*mark[i]),0,1))
 
         # change the marker if the gripper state changes
         if gripper_state_changed:
@@ -268,7 +268,7 @@ class EpisodicDataset(torch.utils.data.Dataset):
         episode_id = self.episode_ids[index]
         dataset_path = os.path.join(self.dataset_dir, f"episode_{episode_id}.hdf5")
         with h5py.File(dataset_path, "r") as root:
-            is_sim = root.attrs["sim"]
+            is_sim = True #root.attrs["sim"]
             original_action_shape = root["/action"].shape
             episode_len = original_action_shape[0]
             if sample_full_episode:
@@ -277,7 +277,6 @@ class EpisodicDataset(torch.utils.data.Dataset):
                 start_ts = np.random.choice(episode_len)
             # get observation at start_ts only
             qpos = root["/observations/qpos"][start_ts]
-            qvel = root["/observations/qvel"][start_ts]
             image_dict = dict()
             for cam_name in self.camera_names:
                 image_dict[cam_name] = root[f"/observations/images/{cam_name}"][
@@ -335,7 +334,7 @@ class EpisodicDataset(torch.utils.data.Dataset):
         qpos_data = torch.from_numpy(qpos).float()
         action_data = torch.from_numpy(padded_action).float()
         is_pad = torch.from_numpy(is_pad).bool()
-
+        
         # channel last
         image_data = torch.einsum("k h w c -> k c h w", image_data)
 
@@ -347,7 +346,6 @@ class EpisodicDataset(torch.utils.data.Dataset):
         qpos_data = (qpos_data - self.norm_stats["qpos_mean"]) / self.norm_stats[
             "qpos_std"
         ]
-
         return image_data, qpos_data, action_data, is_pad
 
 
@@ -358,7 +356,6 @@ def get_norm_stats(dataset_dir, num_episodes):
         dataset_path = os.path.join(dataset_dir, f"episode_{episode_idx}.hdf5")
         with h5py.File(dataset_path, "r") as root:
             qpos = root["/observations/qpos"][()]
-            qvel = root["/observations/qvel"][()]
             action = root["/action"][()]
         all_qpos_data.append(torch.from_numpy(qpos))
         all_action_data.append(torch.from_numpy(action))

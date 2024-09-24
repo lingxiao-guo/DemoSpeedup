@@ -1,7 +1,7 @@
 import pathlib
 
 ### Task parameters
-DATA_DIR = "data/act"
+DATA_DIR = "data/act_origin"
 SIM_TASK_CONFIGS = {
     "sim_transfer_cube_scripted": {
         "dataset_dir": DATA_DIR + "/sim_transfer_cube_scripted",

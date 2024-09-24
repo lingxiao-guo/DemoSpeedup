@@ -107,14 +107,15 @@ class KDE():
     
         # 计算密度
         density = kernel_values.sum(dim=2) / num_samples  # (batch_size, num_samples)
-    
+        x_max_likelihood = x[torch.arange(density.shape[0]),torch.argmax(density,dim=1)]
+        
         # 计算对数密度
         log_density = torch.log(density + 1e-8)  # 添加平滑项以避免 log(0)
-    
+        
         # 计算熵
         entropy = -log_density.mean(dim=1, keepdim=True)  # (batch_size, 1)
-    
-        return entropy
+        
+        return entropy, x_max_likelihood
 
     def kde_marginal_action_entropy(self,x):
         """

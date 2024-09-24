@@ -1,4 +1,5 @@
 import os
+os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
 import h5py
 import argparse
 import numpy as np
@@ -55,23 +56,93 @@ def main(args):
     }
     ckpt_names = [f"policy_last.ckpt"]
     num_rollouts = args.end_idx-args.start_idx+1
-    """if not args.plot_3d:
+    if not args.plot_3d:
         for ckpt_name in ckpt_names:
             entropy_list = label_entropy(args.dataset, num_rollouts, config, ckpt_name)
-            print(f"entropy list:{entropy_list[0].shape}")"""
+            print(f"entropy list:{entropy_list[0].shape}")# """
+            print(f"len entropy list:{len(entropy_list)}")
+            max_entropy_each =np.max(np.array(entropy_list),axis=1)
+            min_entropy_each =np.min(np.array(entropy_list),axis=1)
+            print(f"max entropy each:{max_entropy_each}")
+            print(f"min entropy each:{min_entropy_each}")
+            max_entropy = np.mean(max_entropy_each)
+            min_entropy = np.mean(min_entropy_each)
+            print(f"max entropy:{max_entropy}")
+            print(f"min entropy:{min_entropy}")
+            entropy_var = np.var(np.array(entropy_list))
+            entropy_mean = np.mean(np.array(entropy_list))
+            entropy_norm = (np.array(entropy_list)-entropy_mean)/entropy_var
+            print(f"max e norm:{np.max(entropy_norm)}|min e norm:{np.min(entropy_norm)}")
+            print(entropy_norm[0])
+            for rollout_id in tqdm(range(num_rollouts)):
+              dataset_path = os.path.join(args.dataset, f"episode_{rollout_id}.hdf5")
+              with h5py.File(dataset_path, "r+") as root:
+                name = f"/max_entropy"
+                try:
+                    root[name] = max_entropy
+                except:
+                    del root[name]
+                    root[name] = max_entropy
+                name = f"/min_entropy"
+                try:
+                    root[name] = min_entropy
+                except:
+                    del root[name]
+                    root[name] = min_entropy
+                name = f"/entropy_var"
+                try:
+                    root[name] = entropy_var
+                except:
+                    del root[name]
+                    root[name] = entropy_var
+                name = f"/entropy_mean"
+                try:
+                    root[name] = entropy_mean
+                except:
+                    del root[name]
+                    root[name] = entropy_mean
     
     # load data
     for i in tqdm(range(args.start_idx, args.end_idx + 1)):
         dataset_path = os.path.join(args.dataset, f"episode_{i}.hdf5")
         with h5py.File(dataset_path, "r+") as root:
             qpos = root["/observations/qpos"][()]
-            images = root["/observations/images/top"][()]
             entropy = root["/entropy"][()]
             variance = root["/variance"][()]
             waypoints = root["/waypoints"][()]
             entropy = np.array(entropy)
             variance = np.array(variance)[:,None]
-            if args.use_ee:
+            
+            if args.save_demos:
+                actions = root["/action"][()]
+                images = root["/observations/images/top"][()]
+                waypoints = root["/entropy_waypoints"][()]
+                print(f"Waypoints number:{len(waypoints)}")
+                actions_pad = np.zeros((300, 14),dtype=actions.dtype)
+                qpos_pad = np.zeros((300, 14),dtype=qpos.dtype)
+                images_pad = np.zeros((300,480,640,3),dtype=images.dtype)
+                actions_pad[:len(waypoints)] = actions[waypoints]
+                qpos_pad[:len(waypoints)] = qpos[waypoints]
+                images_pad[:len(waypoints)] = images[waypoints]
+                # 准备数据
+                dataset = {}
+                dataset["/action"] = actions_pad
+                dataset["/observations/images/top"] = images_pad
+                dataset["/observations/qpos"] = qpos_pad
+                path = f"data/act/{task_name}"
+                dataset_path = os.path.join(path, f"episode_{i}.hdf5")
+                print(f"Saving accelerated demos to {dataset_path}")
+            
+                with h5py.File(dataset_path, "w") as new_root:  # 使用 "w" 模式，创建新文件
+                  for name, value in dataset.items():
+                    try:
+                        new_root.create_dataset(name, data=value)
+                        new_root.attrs["sim"] = True
+                    except Exception as e:
+                        print(f"Failed to save dataset '{name}': {e}")
+                    
+
+            if False: # args.use_ee:
                 qpos = np.array(qpos)  # ts, dim
 
                 # calculate EE pose
@@ -79,7 +150,9 @@ def main(args):
 
                 left_arm_ee = get_ee(qpos[:, :6], qpos[:, 6:7])
                 right_arm_ee = get_ee(qpos[:, 7:13], qpos[:, 13:14])
-                qpos = np.concatenate([left_arm_ee, right_arm_ee], axis=1)
+                qrot = np.concatenate([left_arm_ee, right_arm_ee], axis=1)
+                vrot = np.linalg.norm(np.diff(qrot,axis=0),axis=-1)
+                # print(f"v:{np.max(vrot)}")
             """
             # select waypoints            
             waypoints, distance = dp_waypoint_selection( # if it's too slow, use greedy_waypoint_selection
@@ -119,6 +192,7 @@ def main(args):
                 name = f"/entropy_waypoints"  # /entropy_waypoints
                 try:
                     root[name] = waypoints
+                    root.attrs["sim"]=True
                 except:
                     # if the waypoints dataset already exists, ask the user if they want to overwrite
                     # print("waypoints dataset already exists. Overwrite? (y/n)")
@@ -257,17 +331,15 @@ def label_entropy(dataset, num_rollouts, config, ckpt_name, save_episode=True, s
             all_time_entropy = torch.zeros(
                 [max_timesteps, max_timesteps + num_queries, 1]
             ).cuda()
-            all_time_marginal_entropy = torch.zeros(
-                [max_timesteps, max_timesteps + num_queries, state_dim]
+            all_time_samples = torch.zeros(
+                [max_timesteps, max_timesteps + num_queries, 10,state_dim]
             ).cuda()
         qpos_history = torch.zeros((1, max_timesteps, state_dim)).cuda()
         image_list = []  # for visualization
         qpos_list = []
         target_qpos_list = []
         actions_var = []
-        actions_marginal_var = []
         traj_action_entropy = []
-        traj_marginal_entropy = []
         with torch.inference_mode():
             for t in tqdm(range(max_timesteps)):
                 
@@ -284,37 +356,28 @@ def label_entropy(dataset, num_rollouts, config, ckpt_name, save_episode=True, s
                 ### query policy
                 if config["policy_class"] == "ACT":
                     if t % query_frequency == 0:
-                        all_actions, action_entropy, action_marginal_entropy = policy.get_entropy(qpos, curr_image)
-                        # TODO: sample multiple z and estimate variance/entropy, draw it in the video
-                        # num_samples = 2
-                        # action_samples = []
-                        # for n in range(num_samples):
-                        #     all_actions = policy(qpos, curr_image)
-                        #     action_samples.append(all_actions)
-                        # action_samples = torch.stack(action_samples)
-                        action_samples = all_actions
-                        all_actions = torch.mean(action_samples, dim=0)
-                        # left_actions_var = torch.var(action_samples[:,:,:variance_step,:].reshape(num_samples,-1), dim=0)
-                        # right_actions_var = torch.var(action_samples[:,:,:variance_step,:].reshape(num_samples,-1), dim=0)
-                        action_var = torch.var(action_samples, dim=0)
+                        action_samples, action_entropy, _ = policy.get_entropy(qpos, curr_image)
+                        action_samples = action_samples.squeeze().permute(1,0,2)
+                        all_actions = torch.mean(action_samples, dim=1)
+                        action_var = torch.var(action_samples, dim=1)
                         # Only calculate the first step variance
                         
                     if temporal_agg:
                         all_time_actions[[t], t : t + num_queries] = all_actions
+                        all_time_samples[[t], t : t + num_queries] = action_samples
                         all_time_var[[t], t : t + num_queries] = action_var
                         all_time_entropy[[t], t : t + num_queries] = action_entropy
-                        all_time_marginal_entropy[[t], t : t + num_queries] = action_marginal_entropy
                         actions_for_curr_step = all_time_actions[:, t]
+                        samples_for_curr_step = all_time_samples[:, t]
                         action_var_curr_step = all_time_var[:, t]
                         action_entropy_curr_step = all_time_entropy[:, t]
-                        action_marginal_entropy_curr_step = all_time_marginal_entropy[:, t]
                         actions_populated = torch.all(
                             actions_for_curr_step != 0, axis=1
                         )
                         actions_for_curr_step = actions_for_curr_step[actions_populated]
+                        samples_for_curr_step = samples_for_curr_step[actions_populated]
                         action_var_curr_step = action_var_curr_step[actions_populated]
                         action_entropy_curr_step = action_entropy_curr_step[actions_populated]
-                        action_marginal_entropy_curr_step = action_marginal_entropy_curr_step[actions_populated]
                         k = 0.01
                         exp_weights = np.exp(-k * np.arange(len(actions_for_curr_step)))
                         exp_weights = exp_weights / exp_weights.sum()
@@ -324,23 +387,20 @@ def label_entropy(dataset, num_rollouts, config, ckpt_name, save_episode=True, s
                         raw_action = (actions_for_curr_step * exp_weights).sum(
                             dim=0, keepdim=True
                         )
-                        action_var = (action_var_curr_step * exp_weights).sum(
-                            dim=0
-                        )
-                        action_entropy = (action_entropy_curr_step * exp_weights).sum(
-                            dim=0
-                        )
-                        action_marginal_entropy = (action_marginal_entropy_curr_step *exp_weights).sum(
-                            dim=0
-                        )
+                        # action_var = (action_var_curr_step * exp_weights).sum(
+                        #     dim=0
+                        # )
+                        # action_entropy = (action_entropy_curr_step * exp_weights).sum(
+                        #     dim=0
+                        # )
+                        action_entropy = torch.mean(torch.var(samples_for_curr_step.flatten(0,1),dim=0),dim=-1)
+                        action_var = torch.mean(torch.var(samples_for_curr_step.flatten(0,1),dim=0),dim=-1)
                     else:
                         raw_action = all_actions[:, t % query_frequency]
 
                     # actions_var.append(torch.cat((torch.mean(left_actions_var,dim=-1,keepdim=True),torch.mean(right_actions_var,dim=-1,keepdim=True)),dim=-1))
                     actions_var.append(torch.mean(action_var, dim=-1))
-                    actions_marginal_var.append(action_var)
                     traj_action_entropy.append(action_entropy)
-                    traj_marginal_entropy.append(action_marginal_entropy)
                 elif config["policy_class"] == "CNNMLP":
                     raw_action = policy(qpos, curr_image)
                 else:
@@ -370,25 +430,16 @@ def label_entropy(dataset, num_rollouts, config, ckpt_name, save_episode=True, s
         # draw trajectory curves
         actions_var = torch.stack(actions_var)
         actions_var = np.array(actions_var.cpu())
-        actions_marginal_var = torch.stack(actions_marginal_var)
-        actions_marginal_var = np.array(actions_marginal_var.cpu())
         traj_action_entropy = torch.stack(traj_action_entropy)
         traj_action_entropy = np.array(traj_action_entropy.cpu())
-        traj_marginal_entropy = torch.stack(traj_marginal_entropy)
-        traj_marginal_entropy = np.array(traj_marginal_entropy.cpu())
         
         max_var = np.max(actions_var,axis=0)
         min_var = np.min(actions_var,axis=0)
         actions_var_norm = (actions_var - min_var) / (max_var - min_var)
-        max_entropy = np.max(traj_action_entropy, axis=0)
-        min_entropy = np.min(traj_action_entropy, axis=0)
-        actions_entropy_norm = (traj_action_entropy-min_entropy)/(max_entropy-min_entropy)
-        
-        # Don't to normalization to marginal entropy, 
-        # Since the normalization operation has already done in processing the dataset,
-        # AND the abs value of entropy could mean sth. Normalization may hurt this.
-        marginal_entropy_norm = traj_marginal_entropy
-        actions_marginal_var_norm = actions_marginal_var
+        # max_entropy = np.max(traj_action_entropy, axis=0)
+        # min_entropy = np.min(traj_action_entropy, axis=0)
+        # actions_entropy_norm = (traj_action_entropy-min_entropy)/(max_entropy-min_entropy)
+        actions_entropy_norm = traj_action_entropy
 
         entropy_list.append(actions_entropy_norm)
 
@@ -430,18 +481,18 @@ def label_entropy(dataset, num_rollouts, config, ckpt_name, save_episode=True, s
 
         # Only save successful video/plot
         if save_episode : 
-            save_videos(
+            """save_videos(
                 image_list,
                 DT,
                 video_path=os.path.join(ckpt_dir, f"video/video{rollout_id}_{variance_step}.mp4"),
-            )
+            )"""
             fig.savefig(
-                os.path.join(ckpt_dir, f"plot/{task_name}_{rollout_id}_{variance_step}_waypoints.png")
+                os.path.join(ckpt_dir, f"plot/label/{rollout_id}.png")
             )
             ax1.view_init(elev=90, azim=45)
             ax2.view_init(elev=90, azim=45)
             fig.savefig(
-                os.path.join(ckpt_dir, f"plot/{task_name}_{rollout_id}_{variance_step}_view.png")
+                os.path.join(ckpt_dir, f"plot/label/{rollout_id}_view.png")
             )
         if save_labels:
             with h5py.File(dataset_path, "r+") as root:
@@ -457,12 +508,7 @@ def label_entropy(dataset, num_rollouts, config, ckpt_name, save_episode=True, s
                 except:
                     del root[name]
                     root[name] = actions_var_norm[:,None]
-                name = f"/marginal_entropy"
-                try:
-                    root[name] = actions_marginal_var_norm
-                except:
-                    del root[name]
-                    root[name] = actions_marginal_var_norm
+                
         plt.close(fig)
         root.close()
         
@@ -536,6 +582,12 @@ if __name__ == "__main__":
         "--save_waypoints",
         action="store_true",
         help="(optional) whether to save waypoints",
+    )
+
+    parser.add_argument(
+        "--save_demos",
+        action="store_true",
+        help="(optional) whether to save accelerated demos",
     )
 
     # whether to use the ee space for waypoint selection

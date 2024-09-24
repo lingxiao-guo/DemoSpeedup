@@ -68,11 +68,11 @@ def get_xyz(joints):
 
 
 from scipy.spatial.transform import Rotation
-
+import torch
+from pytorch3d.transforms import matrix_to_euler_angles
 
 def get_ee(joints, grippers):
     result = []
-    rotation_transformer = RotationTransformer(from_rep="matrix", to_rep="rotation_6d")
     for joint, gripper in zip(joints, grippers):
         T_sb = mr.FKinSpace(vx300s.M, vx300s.Slist, joint)
 
@@ -82,10 +82,10 @@ def get_ee(joints, grippers):
         # Extract rotation matrix
         rot_matrix = T_sb[:3, :3]
         # Convert to 6d rotation
-        rot_6d = rotation_transformer.forward(rot_matrix)
+        euler_angles = matrix_to_euler_angles(torch.from_numpy(rot_matrix[None,:]), convention='XYZ')
 
         # concatenate xyz with rotation
-        result.append(np.concatenate((xyz, rot_6d, gripper)))
+        result.append(np.concatenate((xyz, euler_angles.squeeze().numpy(), gripper)))
     return np.array(result)
 
 

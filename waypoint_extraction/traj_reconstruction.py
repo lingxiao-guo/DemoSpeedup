@@ -177,7 +177,7 @@ def get_all_pos_only_geometric_distance_gpu(gt_states):
     """Compute the geometric trajectory from the waypoints using PyTorch"""
     import torch
     import os
-    os.environ["CUDA_VISIBLE_DEVICES"] = '7'
+    os.environ["CUDA_VISIBLE_DEVICES"] = '3'
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if torch.cuda.is_available():
         print("Accelerating calculation with GPU...")
@@ -271,11 +271,11 @@ def calculate_weights_from_entropy(actions_entropy, sigma=0.5):
     # entropy_weights = np.clip(1 -actions_entropy,1e-6,1e6) 
     # entropy_weights = np.clip(0.5 - actions_entropy,1e-6,1e6)
     # entropy_weights = np.exp(actions_entropy)
-    # actions_entropy = (actions_entropy-np.min(actions_entropy))/(np.max(actions_entropy)-np.min(actions_entropy))
+    actions_entropy = (actions_entropy-np.min(actions_entropy))/(np.max(actions_entropy)-np.min(actions_entropy))
     # entropy_weights = np.log(actions_entropy+1e-8)
     # entropy_weights = (entropy_weights - np.mean(entropy_weights))/np.var(entropy_weights)
     # entropy_weights = np.clip(0.5-0.5*actions_entropy/np.max(np.abs(actions_entropy)),0,1e6)*5
-    entropy_weights = np.exp(actions_entropy) # |2 0.001 55% 1.93|1 0.0012 60% 2.02 no gripper|
+    entropy_weights = np.exp(actions_entropy*2) # |2 0.001 55% 1.93|1 0.0012 60% 2.02 no gripper|
     len_ = actions_entropy.shape[0]
     # 分母后面应该用整个数据集统计到的，而不是每条demos的来确保一致性
     # entropy_weights = len_ * entropy_weights/np.sum(entropy_weights)

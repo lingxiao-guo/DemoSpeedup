@@ -94,7 +94,7 @@ class DETRVAE(nn.Module):
         self.transformer = transformer
         self.encoder = encoder
         hidden_dim = transformer.d_model
-        self.action_head = nn.Linear(hidden_dim, state_dim*2)
+        self.action_head = nn.Linear(hidden_dim, state_dim)
         self.state_dim = state_dim
         self.is_pad_head = nn.Linear(hidden_dim, 1)
         self.query_embed = nn.Embedding(num_queries, hidden_dim)
@@ -177,8 +177,8 @@ class DETRVAE(nn.Module):
         else:            
             mu = logvar = None
             mu = logvar = torch.zeros([bs, self.latent_dim], dtype=torch.float32).to(qpos.device)
-            latent_sample = reparametrize(mu, logvar)
-            # latent_sample = torch.zeros([bs, self.latent_dim], dtype=torch.float32).to(qpos.device)
+            # latent_sample = reparametrize(mu, logvar)
+            latent_sample = torch.zeros([bs, self.latent_dim], dtype=torch.float32).to(qpos.device)
             
             latent_input = self.latent_out_proj(latent_sample)
 
@@ -218,7 +218,7 @@ class DETRVAE(nn.Module):
         return a_hat, is_pad_hat, [mu, logvar]
         
 
-    def get_entropy(self, qpos, image, env_state=None, num_z_samples = 20, num_a_samples_perz = 1,actions=None, is_pad=None):
+    def get_entropy(self, qpos, image, env_state=None, num_z_samples = 10, num_a_samples_perz = 1,actions=None, is_pad=None):
         """
         estimate entropy from Monta Carlo sampling
         qpos: batch, qpos_dim
@@ -233,6 +233,8 @@ class DETRVAE(nn.Module):
             mu = logvar = torch.zeros([bs, self.latent_dim], dtype=torch.float32).to(qpos.device)
             latent_sample = reparametrize_n(mu, logvar.div(2).exp(), num_z_samples)
             latent_sample = latent_sample.reshape(num_z_samples*bs, self.latent_dim)
+            ood_sample = latent_sample/torch.norm(latent_sample,dim=-1, keepdim=True)*(30*torch.rand_like(latent_sample)+3)
+            latent_sample = torch.cat((latent_sample,ood_sample),dim=0)
             # latent_sample = torch.zeros([num_z_samples*bs, self.latent_dim], dtype=torch.float32).to(qpos.device)
             latent_input = self.latent_out_proj(latent_sample)
 
@@ -251,8 +253,8 @@ class DETRVAE(nn.Module):
             # fold camera dimension into width dimension
             src = torch.cat(all_cam_features, axis=3)
             pos = torch.cat(all_cam_pos, axis=3)
-            src = torch.repeat_interleave(src, num_z_samples, dim=0)
-            proprio_input = torch.repeat_interleave(proprio_input, num_z_samples, dim=0)
+            src = torch.repeat_interleave(src, num_z_samples*2, dim=0)
+            proprio_input = torch.repeat_interleave(proprio_input, num_z_samples*2, dim=0)
             
             hs = self.transformer(
                 src,
@@ -271,7 +273,7 @@ class DETRVAE(nn.Module):
                 transformer_input, None, self.query_embed.weight, self.pos.weight
             )[0]
         output = self.action_head(hs)
-        output = output.reshape(num_z_samples, bs, -1,2*self.state_dim)
+        """output = output.reshape(num_z_samples, bs, -1,2*self.state_dim)
         # a_hat_mean: (num_z_samples, bs, t, state_dim)
         a_hat_mean = output[:,:,:,:self.state_dim]
         a_hat = torch.mean(a_hat_mean, dim=0)
@@ -283,8 +285,12 @@ class DETRVAE(nn.Module):
         # a_samples: (num_a_samples_perz, num_z_samples, bs, t, state_dim)
         a_samples = reparametrize_n(a_hat_mean,a_std,num_a_samples_perz)
         a_samples = a_samples.reshape(num_a_samples_perz * num_z_samples, bs, -1, self.state_dim)
-        
-        # a_samples = output.reshape(num_z_samples, bs, -1, self.state_dim)
+        """
+        # For ood samples:
+        a_samples = output[:num_z_samples*bs,:]
+        a_samples = a_samples.reshape(num_z_samples, bs, -1, self.state_dim)
+        ood_samples = output[num_z_samples*bs:,:]
+        # a_samples = ood_samples.reshape(num_z_samples, bs, -1, self.state_dim)
         # Calculate entropy from MC
         # a_samples_scale: (bs*t, samples, dim)
         # for k in range(num_z_samples):
@@ -300,10 +306,31 @@ class DETRVAE(nn.Module):
         # Calculate entropy from KNN
         # a_entropy = kozachenko_leonenko_entropy(a_samples.reshape(num_a_samples_perz * num_z_samples, -1, self.state_dim).permute(1,0,2))
         # Calculate entropy from kernal
-        a_entropy = KDE.kde_entropy(a_samples.reshape(num_a_samples_perz * num_z_samples, -1, self.state_dim).permute(1,0,2))
+        a_entropy,a_max_likelihood = KDE.kde_entropy(a_samples.reshape(num_a_samples_perz * num_z_samples, -1, self.state_dim).permute(1,0,2))
         a_marginal_entropy = KDE.kde_marginal_action_entropy(a_samples.reshape(num_a_samples_perz * num_z_samples, -1, self.state_dim).permute(1,0,2))
-        return a_samples, a_entropy.reshape(bs, -1, 1), a_marginal_entropy.reshape(bs, -1, self.state_dim)
+        return a_samples, a_entropy.reshape(bs, -1, 1),a_max_likelihood.reshape(bs, -1,self.state_dim)
 
+    def get_safe_actions(self, pos_samples, neg_samples):
+        """
+        pos_samples: (num_samples, batch_size, state_dim)
+        neg_samples: (num_samples, batch_size, state_dim)
+        Return: (batch_size, state_dim) the best sample in terms of contrast
+        """
+        batch_size, num_samples, state_dim = pos_samples.size()
+
+        # 计算每个样本与所有正样本的最小距离
+        pos_distances = torch.cdist(pos_samples, pos_samples, p=2).min(dim=1)[0].unsqueeze(1)
+        # 计算每个样本与所有负样本的最大距离
+        neg_distances = torch.cdist(neg_samples, neg_samples, p=2).max(dim=1)[0].unsqueeze(1)
+
+        # 计算每个样本的对比度得分（离负样本的距离 - 离正样本的距离）
+        contrast_scores = neg_distances - pos_distances
+
+        # 选择对比度得分最高的样本
+        best_sample_idx = contrast_scores.argmax(dim=1)
+        best_samples = torch.gather(pos_samples, 1, best_sample_idx.unsqueeze(0).unsqueeze(-1).expand(num_samples, batch_size, state_dim))
+
+        return best_samples.squeeze(0)
 
 class CNNMLP(nn.Module):
     def __init__(self, backbones, state_dim, camera_names):
