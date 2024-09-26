@@ -367,7 +367,7 @@ def eval_bc(config, ckpt_name, H_dict,save_episode=True):
                         #     flag = True
                             
                         actions_for_curr_step = actions_for_curr_step[actions_populated]
-                        if t>50 :#and weights >0:
+                        if t>50 and weights >0:
                             _,actions_for_curr_step = KDE.kde_entropy(actions_for_curr_step.unsqueeze(0),k=25) # int(50-50*weights)
                             # actions_for_curr_step = actions_for_curr_step[-25:]
                           # print(actions_for_curr_step.shape,"#")
