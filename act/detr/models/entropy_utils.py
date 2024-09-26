@@ -85,7 +85,7 @@ class KDE():
         self.flag = kde_flag
         self.marginal_flag = marginal_flag
     
-    def kde_entropy(self,x):
+    def kde_entropy(self,x,k=5):
         """
         使用核密度估计计算样本的熵，并对批次进行并行计算。
 
@@ -101,14 +101,15 @@ class KDE():
         if self.flag:
             bandwidth = self.estimate_bandwidth(x[0])
             self.flag = False
-        bandwidth = 0.001 # 0.002 for insertion, 0.001 for transfer
+        bandwidth = 0.002 # 0.002 for insertion, 0.001 for transfer
         # 计算高斯核
         kernel_values = gaussian_kernel(x, bandwidth)  # (batch_size, num_samples, num_samples)
     
         # 计算密度
         density = kernel_values.sum(dim=2) / num_samples  # (batch_size, num_samples)
-        x_max_likelihood = x[torch.arange(density.shape[0]),torch.argmax(density,dim=1)]
-        
+        _, indices = torch.topk(density, k=k, dim=1)
+        sorted_indices = indices.squeeze(0).sort(dim=0)[0]
+        x_max_likelihood = x[0, sorted_indices, :]
         # 计算对数密度
         log_density = torch.log(density + 1e-8)  # 添加平滑项以避免 log(0)
         

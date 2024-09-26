@@ -55,7 +55,8 @@ def plot_3d_trajectory(ax, traj_list, actions_var_norm=None, distance=None, labe
         import math
         actions_var_log = [math.log(var+1e-8) for var in actions_var_norm] # math.log(var+1e-8)
         actions_var_log = np.array(actions_var_log)
-        mark = (actions_var_log - np.mean(actions_var_log))/np.var(actions_var_log)
+        # mark = (actions_var_log - np.mean(actions_var_log))/np.var(actions_var_log)
+        mark = np.clip(1-actions_var_norm, 0,1)
     elif distance is not None:
         mark = [d*50 for d in distance]
 

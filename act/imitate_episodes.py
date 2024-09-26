@@ -123,7 +123,7 @@ def main(args):
             entropy_var = torch.from_numpy(np.array(entropy_var)).float().cuda().unsqueeze(0)
             entropy_mean = torch.from_numpy(np.array(entropy_mean)).float().cuda().unsqueeze(0)
     H_dict = {"mean":entropy_mean,"var":entropy_var,"max":entropy_max,"min":entropy_min}
-
+   
     if is_eval:
         ckpt_names = [f"policy_last.ckpt"]
         results = []
@@ -206,7 +206,7 @@ def get_image(ts, camera_names):
 
 KDE = KDE()
 def eval_bc(config, ckpt_name, H_dict,save_episode=True):
-    set_seed(2)
+    set_seed(0)
     ckpt_dir = config["ckpt_dir"]
     state_dim = config["state_dim"]
     real_robot = config["real_robot"]
@@ -321,23 +321,13 @@ def eval_bc(config, ckpt_name, H_dict,save_episode=True):
                         all_actions = policy(qpos, curr_image)
                         # get entropy
                         action_samples,_,action_trust = policy.get_entropy(qpos, curr_image)
-                        action_samples = action_samples.squeeze().permute(1,0,2)
+                        action_samples = action_samples.squeeze().permute(1,0,2) # (bs, num_samples, dim)
                         # all_actions = action_samples[:,-1].reshape(all_actions.shape)
-                        # entropy = (entropy-H_dict["min"])/(H_dict["max"]-H_dict["min"])
+                        # entropy = torch.mean(torch.var(action_samples,dim=1))
+                        # entropy = (entropy-1e-7)/(2.5e-6-1e-7)
                         # all_actions = action_trust if weights >0 else all_actions
                         # get waypoints using entropy and actions
-                        """waypoints, _ = optimize_waypoint_selection( # if it's too slow, use greedy_waypoint_selection
-                            env=None,
-                            actions=all_actions.squeeze().cpu().numpy(),
-                            gt_states=all_actions.squeeze().cpu().numpy(),
-                            err_threshold=0.002,
-                            pos_only=True,
-                            entropy=entropy.squeeze().cpu().numpy(),
-                        )
-                        # sample actions from waypoints
-                        all_actions = all_actions[:,waypoints] 
-                        waypoint_count = len(waypoints)
-                        openloop_t = 0 # """
+                            
                     if temporal_agg:
                         all_time_actions[[t], t : t + num_queries] = all_actions
                         actions_for_curr_step = all_time_actions[:, t]
@@ -346,7 +336,7 @@ def eval_bc(config, ckpt_name, H_dict,save_episode=True):
                         )
                         all_time_samples[[t], t : t + num_queries] = action_samples
 
-                        actions_for_next_step = all_time_actions[:, t+10]
+                        actions_for_next_step = all_time_actions[:, t+10] # t+10
                         samples_populated = torch.all(
                             actions_for_next_step != 0, axis=1
                         )
@@ -356,7 +346,7 @@ def eval_bc(config, ckpt_name, H_dict,save_episode=True):
                         entropy = torch.mean(torch.var(samples_for_curr_step.flatten(0,1),dim=0),dim=-1)
                         entropy = (entropy-H_dict["min"])/(H_dict["max"]-H_dict["min"])
                         traj_action_entropy.append(entropy.squeeze())
-                        weights = torch.clip(0.2-0.2*entropy.squeeze(),0,0.2)  # weights: 80%: 0 20% 0~1
+                        weights = 5*torch.clip(0.2-entropy.squeeze(),0,0.2)  # weights: 80%: 0 20% 0~1
                         # weights = 1 if weights >0 else 0
                         weights = weights.cpu().numpy()
                         k = 0.01 # *np.exp(10*weights)  # k: 0.01~0.2
@@ -377,6 +367,10 @@ def eval_bc(config, ckpt_name, H_dict,save_episode=True):
                         #     flag = True
                             
                         actions_for_curr_step = actions_for_curr_step[actions_populated]
+                        if t>50 :#and weights >0:
+                            _,actions_for_curr_step = KDE.kde_entropy(actions_for_curr_step.unsqueeze(0),k=25) # int(50-50*weights)
+                            # actions_for_curr_step = actions_for_curr_step[-25:]
+                          # print(actions_for_curr_step.shape,"#")
                         # k = 0.01 
                         exp_weights = np.exp(-k * np.arange(len(actions_for_curr_step)))
                         exp_weights = exp_weights / exp_weights.sum()
@@ -388,6 +382,10 @@ def eval_bc(config, ckpt_name, H_dict,save_episode=True):
                         )
                     else:
                         raw_action = all_actions[:, t % query_frequency]
+                        entropy = torch.mean(torch.var(action_samples.squeeze(),dim=1),dim=-1)
+                        entropy = (entropy-H_dict["min"])/(H_dict["max"]-H_dict["min"])
+                        entropy = [e for e in entropy]
+                        traj_action_entropy.extend(entropy)
                         # raw_action = all_actions[:, openloop_t]
                         # openloop_t += 1
 
@@ -437,7 +435,7 @@ def eval_bc(config, ckpt_name, H_dict,save_episode=True):
         
         traj_action_entropy = torch.stack(traj_action_entropy)
         traj_action_entropy = np.array(traj_action_entropy.cpu())
-
+        traj_action_entropy = (traj_action_entropy-np.min(traj_action_entropy))/(np.max(traj_action_entropy)-np.min(traj_action_entropy))
         qpos = np.array(qpos_list)  # ts, dim
         from act.convert_ee import get_xyz
 
@@ -506,6 +504,7 @@ def eval_bc(config, ckpt_name, H_dict,save_episode=True):
         # fig.savefig(
         #         os.path.join(ckpt_dir, f"plot/rollout{rollout_id}_qpos.png")
         #     )
+        plt.close()
         print(f"Save qpos curve to {ckpt_dir}/plot/rollout{rollout_id}_qpos.png")
         
 
