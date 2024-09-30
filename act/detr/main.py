@@ -107,6 +107,9 @@ def get_args_parser():
     parser.add_argument(
         "--visualize_entropy", action="store_true", help="visualize trajectory entropy"
     )
+    parser.add_argument(
+        "--eval_speed", action="store_true", help="eval sped up policy"
+    )
     parser.add_argument("--onscreen_render", action="store_true")
     parser.add_argument(
         "--ckpt_dir", action="store", type=str, help="ckpt_dir", required=True

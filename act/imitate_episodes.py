@@ -3,9 +3,10 @@ import numpy as np
 import os
 os.environ['MUJOCO_GL'] = 'osmesa'
 os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
-os.environ["CUDA_VISIBLE_DEVICES"] = '6'
+os.environ["CUDA_VISIBLE_DEVICES"] = '2'
 import pickle
 import h5py
+import math
 import argparse
 import matplotlib.pyplot as plt
 from copy import deepcopy
@@ -118,8 +119,8 @@ def main(args):
     with h5py.File(dataset_path, "r") as root:
             entropy_var = root["/entropy_var"][()]
             entropy_mean = root["/entropy_mean"][()]
-            entropy_min = root["/min_entropy"][()]
-            entropy_max = root["/max_entropy"][()]
+            entropy_min = root["/min_var"][()]
+            entropy_max = root["/max_var"][()]
             entropy_var = torch.from_numpy(np.array(entropy_var)).float().cuda().unsqueeze(0)
             entropy_mean = torch.from_numpy(np.array(entropy_mean)).float().cuda().unsqueeze(0)
     H_dict = {"mean":entropy_mean,"var":entropy_var,"max":entropy_max,"min":entropy_min}
@@ -136,7 +137,20 @@ def main(args):
             print(f"{ckpt_name}: {success_rate=} {avg_return=}")
         print()
         exit()
-   
+    
+    if args["eval_speed"]:
+        ckpt_names = [f"policy_last.ckpt"]
+        results = []
+        for ckpt_name in ckpt_names:
+            # success_rate, avg_return = plot_trajectory_variance(config, ckpt_name, args["save_demos"],save_episode=True)
+            success_rate, avg_return = eval_speed_bc(config, ckpt_name, H_dict,save_episode=True)
+            results.append([ckpt_name, success_rate, avg_return])
+
+        for ckpt_name, success_rate, avg_return in results:
+            print(f"{ckpt_name}: {success_rate=} {avg_return=}")
+        print()
+        exit()
+
     if args["visualize_entropy"]:
         ckpt_names = [f"policy_last.ckpt"]
         results = []
@@ -206,7 +220,7 @@ def get_image(ts, camera_names):
 
 KDE = KDE()
 def eval_bc(config, ckpt_name, H_dict,save_episode=True):
-    set_seed(0)
+    set_seed(1000)
     ckpt_dir = config["ckpt_dir"]
     state_dim = config["state_dim"]
     real_robot = config["real_robot"]
@@ -254,9 +268,11 @@ def eval_bc(config, ckpt_name, H_dict,save_episode=True):
 
     max_timesteps = int(max_timesteps * 1)  # may increase for real-world tasks
     #max_timesteps = 250
-    num_rollouts = 50
+    num_rollouts = 20
     episode_returns = []
     highest_rewards = []
+    H_min_list = []
+    H_max_list = []
     for rollout_id in range(num_rollouts):
         rollout_id += 0
         ### set task
@@ -278,6 +294,9 @@ def eval_bc(config, ckpt_name, H_dict,save_episode=True):
         if temporal_agg:
             all_time_actions = torch.zeros(
                 [max_timesteps, max_timesteps + num_queries, state_dim]
+            ).cuda()
+            all_time_entropy = torch.zeros(
+                [max_timesteps, max_timesteps + num_queries, 1]
             ).cuda()
             all_time_samples = torch.zeros(
                 [max_timesteps, max_timesteps + num_queries, 10,state_dim]
@@ -321,10 +340,10 @@ def eval_bc(config, ckpt_name, H_dict,save_episode=True):
                         all_actions = policy(qpos, curr_image)
                         # get entropy
                         action_samples,_,action_trust = policy.get_entropy(qpos, curr_image)
-                        action_samples = action_samples.squeeze().permute(1,0,2) # (bs, num_samples, dim)
+                        action_samples = action_samples.squeeze().permute(1,0,2) # (chunk_len, num_samples, dim)
                         # all_actions = action_samples[:,-1].reshape(all_actions.shape)
-                        # entropy = torch.mean(torch.var(action_samples,dim=1))
-                        # entropy = (entropy-1e-7)/(2.5e-6-1e-7)
+                        entropy = torch.mean(torch.var(action_samples,dim=1))
+                        # entropy = (entropy-H_dict["min"])/(H_dict["max"]-H_dict["min"])
                         # all_actions = action_trust if weights >0 else all_actions
                         # get waypoints using entropy and actions
                             
@@ -334,17 +353,28 @@ def eval_bc(config, ckpt_name, H_dict,save_episode=True):
                         actions_populated = torch.all(
                             actions_for_curr_step != 0, axis=1
                         )
-                        all_time_samples[[t], t : t + num_queries] = action_samples
+                        actions_for_curr_step = actions_for_curr_step[actions_populated]
 
+                        all_time_samples[[t], t : t + num_queries] = action_samples
                         actions_for_next_step = all_time_actions[:, t+10] # t+10
                         samples_populated = torch.all(
                             actions_for_next_step != 0, axis=1
                         )
                         samples_for_curr_step = all_time_samples[:, t]
                         samples_for_curr_step = samples_for_curr_step[samples_populated]
-
-                        entropy = torch.mean(torch.var(samples_for_curr_step.flatten(0,1),dim=0),dim=-1)
-                        entropy = (entropy-H_dict["min"])/(H_dict["max"]-H_dict["min"])
+                        
+                        all_time_entropy[[t], t : t + num_queries] = entropy
+                        entropy_for_curr_step = all_time_entropy[:,t]
+                        entropy_for_curr_step = entropy_for_curr_step[actions_populated]
+                        # entropy = torch.mean(torch.var(samples_for_curr_step.flatten(0,1),dim=0),dim=-1)
+                        # entropy = (entropy-H_dict["min"])/(H_dict["max"]-H_dict["min"])
+                        exp_weights = np.exp(-0.01 * np.arange(len(actions_for_curr_step)))
+                        exp_weights = (
+                            torch.from_numpy(exp_weights).cuda().unsqueeze(dim=1)
+                        )
+                        entropy = (entropy_for_curr_step * exp_weights).sum(
+                            dim=0, keepdim=True
+                        )
                         traj_action_entropy.append(entropy.squeeze())
                         weights = 5*torch.clip(0.2-entropy.squeeze(),0,0.2)  # weights: 80%: 0 20% 0~1
                         # weights = 1 if weights >0 else 0
@@ -366,9 +396,8 @@ def eval_bc(config, ckpt_name, H_dict,save_episode=True):
                         # else:
                         #     flag = True
                             
-                        actions_for_curr_step = actions_for_curr_step[actions_populated]
-                        if t>50 and weights >0:
-                            _,actions_for_curr_step = KDE.kde_entropy(actions_for_curr_step.unsqueeze(0),k=25) # int(50-50*weights)
+                        # if t>50 and weights >0:
+                        #     _,actions_for_curr_step = KDE.kde_entropy(actions_for_curr_step.unsqueeze(0),k=25) # int(40-30*weights)
                             # actions_for_curr_step = actions_for_curr_step[-25:]
                           # print(actions_for_curr_step.shape,"#")
                         # k = 0.01 
@@ -435,6 +464,9 @@ def eval_bc(config, ckpt_name, H_dict,save_episode=True):
         
         traj_action_entropy = torch.stack(traj_action_entropy)
         traj_action_entropy = np.array(traj_action_entropy.cpu())
+        print(f"max:{np.max(traj_action_entropy)} min:{np.min(traj_action_entropy)}")
+        H_min_list.append(np.min(traj_action_entropy))
+        H_max_list.append(np.max(traj_action_entropy))
         traj_action_entropy = (traj_action_entropy-np.min(traj_action_entropy))/(np.max(traj_action_entropy)-np.min(traj_action_entropy))
         qpos = np.array(qpos_list)  # ts, dim
         from act.convert_ee import get_xyz
@@ -517,7 +549,7 @@ def eval_bc(config, ckpt_name, H_dict,save_episode=True):
         summary_str += f"Reward >= {r}: {more_or_equal_r}/{num_rollouts} = {more_or_equal_r_rate*100}%\n"
 
     print(summary_str)
-
+    print(f"min entropy:{np.mean(np.array(H_min_list))}|max entropy:{np.mean(np.array(H_max_list))}")
     # save success rate to txt
     result_file_name = "result_" + ckpt_name.split(".")[0] + ".txt"
     with open(os.path.join(ckpt_dir, result_file_name), "w") as f:
@@ -525,7 +557,7 @@ def eval_bc(config, ckpt_name, H_dict,save_episode=True):
         f.write(repr(episode_returns))
         f.write("\n\n")
         f.write(repr(highest_rewards))
-
+    
     return success_rate, avg_return
 
 
@@ -1145,6 +1177,391 @@ def plot_trajectory_variance(config, ckpt_name, save_demos=False,save_episode=Tr
     
     return success_rate, avg_return
 
+def eval_speed_bc(config, ckpt_name, H_dict,save_episode=True):
+    set_seed(0)
+    ckpt_dir = config["ckpt_dir"]
+    state_dim = config["state_dim"]
+    real_robot = config["real_robot"]
+    policy_class = config["policy_class"]
+    onscreen_render = config["onscreen_render"]
+    policy_config = config["policy_config"]
+    camera_names = config["camera_names"]
+    max_timesteps = config["episode_len"]
+    task_name = config["task_name"]
+    temporal_agg = config["temporal_agg"]
+    onscreen_cam = "angle"
+   
+    # load policy and stats
+    ckpt_path = os.path.join(ckpt_dir, ckpt_name)
+    policy = make_policy(policy_class, policy_config)
+    loading_status = policy.load_state_dict(torch.load(ckpt_path))
+    print(loading_status)
+    policy.cuda()
+    policy.eval()
+    print(f"Loaded: {ckpt_path}")
+    stats_path = os.path.join(ckpt_dir, f"dataset_stats.pkl")
+    with open(stats_path, "rb") as f:
+        stats = pickle.load(f)
+
+    pre_process = lambda s_qpos: (s_qpos - stats["qpos_mean"]) / stats["qpos_std"]
+    post_process = lambda a: a * stats["action_std"] + stats["action_mean"]
+    # load environment
+    if real_robot:
+        from aloha_scripts.robot_utils import move_grippers  # requires aloha
+        from aloha_scripts.real_env import make_real_env  # requires aloha
+
+        env = make_real_env(init_node=True)
+        env_max_reward = 0
+    else:
+        from act.sim_env import make_sim_env
+        
+        env = make_sim_env(task_name)
+        env_max_reward = env.task.max_reward
+
+    query_frequency = policy_config["num_queries"]
+    query_frequency = 50//4
+    if temporal_agg:
+        query_frequency = 1
+        num_queries = policy_config["num_queries"]
+
+    max_timesteps = int(max_timesteps * 1)  # may increase for real-world tasks
+    max_timesteps = max_timesteps//2
+    num_rollouts = 50
+    episode_returns = []
+    highest_rewards = []
+    max_entropy_list = []
+    min_entropy_list = []
+    for rollout_id in range(num_rollouts):
+        rollout_id += 0
+        ### set task
+        if "sim_transfer_cube" in task_name:
+            BOX_POSE[0] = sample_box_pose()  # used in sim reset
+        elif "sim_insertion" in task_name:
+            BOX_POSE[0] = np.concatenate(sample_insertion_pose())  # used in sim reset
+        
+        ts = env.reset()
+ 
+        ### onscreen render
+        if onscreen_render:
+            ax = plt.subplot()
+            plt_img = ax.imshow(
+                env._physics.render(height=480, width=640, camera_id=onscreen_cam)
+            )
+            plt.ion()
+        ### evaluation loop
+        if temporal_agg:
+            all_time_actions = torch.zeros(
+                [max_timesteps, max_timesteps + num_queries, state_dim]
+            ).cuda()
+            all_time_entropy = torch.zeros(
+                [max_timesteps, max_timesteps + num_queries, 1]
+            ).cuda()
+            all_time_samples = torch.zeros(
+                [max_timesteps, max_timesteps + num_queries, 10,state_dim]
+            ).cuda()
+ 
+        qpos_history = torch.zeros((1, max_timesteps, state_dim)).cuda()
+        image_list = []  # for visualization
+        qpos_list = []
+        target_qpos_list = []
+        rewards = []
+        traj_action_entropy = []
+        flag = False
+        waypoint_count = 0
+        openloop_t = 0
+        last_t = 0
+        timestep_count = 0
+        policy_slow = False
+        with torch.inference_mode():
+            for t in tqdm(range(max_timesteps)):
+                ### update onscreen render and wait for DT
+                if onscreen_render:
+                    image = env._physics.render(
+                        height=480, width=640, camera_id=onscreen_cam
+                    )
+                    plt_img.set_data(image)
+                    plt.pause(DT)
+
+                ### process previous timestep to get qpos and image_list
+                obs = ts.observation
+                if "images" in obs:
+                    image_list.append(obs["images"])
+                else:
+                    image_list.append({"main": obs["image"]})
+                qpos_numpy = np.array(obs["qpos"])
+                qpos = pre_process(qpos_numpy)
+                qpos = torch.from_numpy(qpos).float().cuda().unsqueeze(0)
+                qpos_history[:, t] = qpos
+                curr_image = get_image(ts, camera_names)
+
+                ### query policy
+                if config["policy_class"] == "ACT":
+                    if t % query_frequency == 0:
+                        all_actions = policy(qpos, curr_image)
+                        # get entropy
+                        action_samples,_,action_trust = policy.get_entropy(qpos, curr_image)
+                        action_samples = action_samples.squeeze().permute(1,0,2) # (chunk_len, num_samples, dim)
+                        # all_actions = action_samples[:,-1].reshape(all_actions.shape)
+                        # entropy = torch.mean(torch.var(action_samples,dim=1),dim=-1,keepdim=True)
+                        # entropy = (entropy)*1e5 # 6e-7, 6e-5 for insertion
+                        # entropy = torch.clip(entropy, 0, 1)
+                        # all_actions = action_trust if weights >0 else all_actions
+                        # get waypoints using entropy and actions
+                            
+                    if temporal_agg:
+                        if not policy_slow:
+                            # all_time_actions[[t], t : t + num_queries] = all_actions
+                            all_speed_actions = all_actions[:,::3]
+                            all_time_actions[[t], t:t + all_speed_actions.shape[1]] = all_speed_actions
+                            actions_for_curr_step = all_time_actions[:, t]
+                            actions_populated = torch.all(
+                                actions_for_curr_step != 0, axis=1
+                            )
+                            actions_for_curr_step = actions_for_curr_step[actions_populated]
+    
+                            all_time_samples[[t], t:t+ all_speed_actions.shape[1]] = action_samples[::3]
+                            actions_for_next_step = all_time_actions[:, t] # t+10
+                            samples_populated = torch.all(
+                                actions_for_next_step != 0, axis=1
+                            )
+                            samples_for_curr_step = all_time_samples[:, t]
+                            samples_for_curr_step = samples_for_curr_step[samples_populated]
+                            
+                            entropy = torch.mean(torch.var(samples_for_curr_step.flatten(0,1),dim=0),dim=-1)
+                            exp_weights = np.exp(-0.01 * np.arange(len(actions_for_curr_step)))
+                            exp_weights = (
+                                torch.from_numpy(exp_weights).cuda().unsqueeze(dim=1)
+                            )
+                            # entropy = (entropy_for_curr_step * exp_weights).sum(
+                            #     dim=0, keepdim=True
+                            # )
+                            entropy = (math.log(torch.mean(entropy)+1e-8,1.5))
+                            # entropy = torch.tensor(entropy).cuda()
+                            # For transfer 2x
+                            # entropy = torch.tensor((entropy+37)/32).cuda() # 20%： 0.8
+                            # For insertion 2x
+                            # entropy = torch.tensor((entropy+37)/34.5).cuda()  # 20%：0.7
+                            # For transfer 3x
+                            entropy = torch.tensor((entropy+37)/32).cuda() # 0.82
+                            # For insertion 3x
+                            # entropy = torch.tensor((entropy+37)/34.5).cuda()  # 20%：0.7
+                            weights = 5*torch.clip(0.2-entropy.squeeze(),0,0.2)  # weights: 80%: 0 20% 0~1
+                            # weights = 1 if weights >0 else 0
+                            weights = weights.cpu().numpy()
+                            k = 0.01 
+                           
+                        if (t>20 and entropy <0.82) or policy_slow:
+                            
+                            policy_slow = True
+                            a=0 #_,actions_for_curr_step = KDE.kde_entropy(actions_for_curr_step.unsqueeze(0),k=13)
+                            # slow policy
+                            all_speed_actions = all_actions[:,::2]
+                            all_time_actions[[t], t:t + all_speed_actions.shape[1]] = all_speed_actions
+                            actions_for_curr_step = all_time_actions[:, t]
+                            actions_populated = torch.all(
+                                actions_for_curr_step != 0, axis=1
+                            )
+                            actions_for_curr_step = actions_for_curr_step[actions_populated]
+    
+                            all_time_samples[[t], t:t+ all_speed_actions.shape[1]] = action_samples[::2]
+                            actions_for_next_step = all_time_actions[:, t] # t+10
+                            samples_populated = torch.all(
+                                actions_for_next_step != 0, axis=1
+                            )
+                            samples_for_curr_step = all_time_samples[:, t]
+                            samples_for_curr_step = samples_for_curr_step[samples_populated]
+                            
+                            entropy = torch.mean(torch.var(samples_for_curr_step.flatten(0,1),dim=0),dim=-1)
+                            exp_weights = np.exp(-0.01 * np.arange(len(actions_for_curr_step)))
+                            exp_weights = (
+                                torch.from_numpy(exp_weights).cuda().unsqueeze(dim=1)
+                            )
+                            # entropy = (entropy_for_curr_step * exp_weights).sum(
+                            #     dim=0, keepdim=True
+                            # )
+                            entropy = (math.log(torch.mean(entropy)+1e-8,1.5))
+                            # entropy = torch.tensor(entropy).cuda()
+                            # For transfer 2x
+                            # entropy = torch.tensor((entropy+37)/32).cuda() # 20%： 0.8
+                            # For insertion 2x
+                            # entropy = torch.tensor((entropy+37)/34.5).cuda()  # 20%：0.7
+                            # For transfer 3x
+                            entropy = torch.tensor((entropy+37)/32).cuda() # 0.8
+                            # For insertion 3x
+                            # entropy = torch.tensor((entropy+37)/34.5).cuda()  # 20%：0.7
+                            weights = 5*torch.clip(0.2-entropy.squeeze(),0,0.2)  # weights: 80%: 0 20% 0~1
+                            # weights = 1 if weights >0 else 0
+                            weights = weights.cpu().numpy()
+                            k = 0.01 
+                            # Change policy_slow flag if entropy is large
+                            if entropy>0.82:
+                                policy_slow = False
+                        
+                        # k = 0.01 
+                        exp_weights = np.exp(-k * np.arange(len(actions_for_curr_step)))
+                        exp_weights = exp_weights / exp_weights.sum()
+                        exp_weights = (
+                            torch.from_numpy(exp_weights).cuda().unsqueeze(dim=1)
+                        )
+                        raw_action = (actions_for_curr_step * exp_weights).sum(
+                            dim=0, keepdim=True
+                        )
+                        traj_action_entropy.append(entropy.squeeze())
+                            
+                    else:
+                        raw_action = all_actions[:, t % query_frequency]
+                        entropy = torch.mean(torch.var(action_samples.squeeze(),dim=1),dim=-1)
+                        # entropy = (entropy-H_dict["min"])/(H_dict["max"]-H_dict["min"])
+                        entropy = [e for e in entropy]
+                        traj_action_entropy.extend(entropy)
+                        # raw_action = all_actions[:, openloop_t]
+                        # openloop_t += 1
+
+                elif config["policy_class"] == "CNNMLP":
+                    raw_action = policy(qpos, curr_image)
+                else:
+                    raise NotImplementedError
+                
+                ### post-process actions
+                raw_action = raw_action.squeeze(0).cpu().numpy()
+                action = post_process(raw_action)
+                target_qpos = action
+
+                ### step the environment
+                ### close-loop at gripper open/close destroy the performance
+                ts = env.step(target_qpos)
+                timestep_count += 1
+                qpos_list.append(qpos_numpy)
+                target_qpos_list.append(target_qpos)
+                rewards.append(ts.reward)
+                # compensate for imperfect gripper
+                  
+                    
+                if np.array(ts.reward) == env_max_reward:
+                    timestep_count -= 1
+                    # print(t)
+                    break
+
+            plt.close()
+        if real_robot:
+            move_grippers(
+                [env.puppet_bot_left, env.puppet_bot_right],
+                [PUPPET_GRIPPER_JOINT_OPEN] * 2,
+                move_time=0.5,
+            )  # open
+            pass
+
+        rewards = np.array(rewards)
+        episode_return = np.sum(rewards[rewards != None])
+        episode_returns.append(episode_return)
+        episode_highest_reward = np.max(rewards)
+        highest_rewards.append(episode_highest_reward)
+        print(
+            f"Rollout {rollout_id}\n{episode_return=}, {episode_highest_reward=}, {env_max_reward=}, Success: {episode_highest_reward==env_max_reward}"
+        )
+        print(f"Total time count:{timestep_count}")
+        traj_action_entropy = torch.stack(traj_action_entropy)
+        traj_action_entropy = np.array(traj_action_entropy.cpu())
+        print(traj_action_entropy.shape)
+        print(f"max:{np.max(traj_action_entropy[:])} min:{np.min(traj_action_entropy[:])}")
+        """if episode_highest_reward==env_max_reward:
+            max_entropy_list.append(np.max(traj_action_entropy))
+            min_entropy_list.append(np.min(traj_action_entropy))
+        traj_action_entropy = (traj_action_entropy-np.min(traj_action_entropy))/(np.max(traj_action_entropy)-np.min(traj_action_entropy))
+        """
+        qpos = np.array(qpos_list)  # ts, dim
+        from act.convert_ee import get_xyz
+
+        left_arm_xyz = get_xyz(qpos[:, :6])
+        right_arm_xyz = get_xyz(qpos[:, 7:13])
+        # Find global min and max for each axis
+        all_data = np.concatenate([left_arm_xyz, right_arm_xyz], axis=0)
+        min_x, min_y, min_z = np.min(all_data, axis=0)
+        max_x, max_y, max_z = np.max(all_data, axis=0)
+
+        fig = plt.figure(figsize=(20, 10))
+        ax1 = fig.add_subplot(121, projection="3d") 
+        ax1.set_xlabel("x")
+        ax1.set_ylabel("y")
+        ax1.set_zlabel("z")
+        ax1.set_title("Left", fontsize=20)
+        ax1.set_xlim([min_x, max_x])
+        ax1.set_ylim([min_y, max_y])
+        ax1.set_zlim([min_z, max_z])
+        from act.act_utils import plot_3d_trajectory
+        plot_3d_trajectory(ax1, left_arm_xyz, traj_action_entropy,label="policy rollout", legend=False)
+
+        ax2 = fig.add_subplot(122, projection="3d")
+        ax2.set_xlabel("x")
+        ax2.set_ylabel("y")
+        ax2.set_zlabel("z")
+        ax2.set_title("Right", fontsize=20)
+        ax2.set_xlim([min_x, max_x])
+        ax2.set_ylim([min_y, max_y])
+        ax2.set_zlim([min_z, max_z])
+
+        plot_3d_trajectory(ax2, right_arm_xyz, traj_action_entropy,label="policy rollout", legend=False)
+        fig.suptitle(f"Task: {task_name}", fontsize=30) 
+
+        handles, labels = ax1.get_legend_handles_labels()
+        fig.legend(handles, labels, loc="lower center", ncol=2, fontsize=20)
+        
+        if save_episode:
+            save_videos(
+                image_list,
+                DT,
+                video_path=os.path.join(ckpt_dir, f"video/video{rollout_id}.mp4"),
+            )
+            fig.savefig(
+                os.path.join(ckpt_dir, f"plot/rollout{rollout_id}.png")
+            )
+            ax1.view_init(elev=90, azim=45)
+            ax2.view_init(elev=90, azim=45)
+            fig.savefig(
+                os.path.join(ckpt_dir, f"plot/rollout{rollout_id}_view.png")
+            )
+        
+        n_groups = qpos_numpy.shape[-1]
+        tstep = np.linspace(0, 1, qpos_numpy.shape[0]-1) 
+        fig, axes = plt.subplots(nrows=n_groups, ncols=1, figsize=(8, 2 * n_groups), sharex=True)
+
+        """for n, ax in enumerate(axes):
+            ax.plot(tstep, np.array(qpos_list)[1:, n], label=f'real qpos {n}')
+            ax.plot(tstep, np.array(target_qpos_list)[:-1, n], label=f'target qpos {n}')
+            ax.set_title(f'qpos {n}')
+            ax.legend()
+        """
+        plt.xlabel('timestep')
+        plt.ylabel('qpos')
+        plt.tight_layout()
+        # fig.savefig(
+        #         os.path.join(ckpt_dir, f"plot/rollout{rollout_id}_qpos.png")
+        #     )
+        plt.close()
+        print(f"Save qpos curve to {ckpt_dir}/plot/rollout{rollout_id}_qpos.png")
+        
+
+    success_rate = np.mean(np.array(highest_rewards) == env_max_reward)
+    avg_return = np.mean(episode_returns)
+    summary_str = f"\nSuccess rate: {success_rate}\nAverage return: {avg_return}\n\n"
+    for r in range(env_max_reward + 1):
+        more_or_equal_r = (np.array(highest_rewards) >= r).sum()
+        more_or_equal_r_rate = more_or_equal_r / num_rollouts
+        summary_str += f"Reward >= {r}: {more_or_equal_r}/{num_rollouts} = {more_or_equal_r_rate*100}%\n"
+
+    print(summary_str)
+
+    # save success rate to txt
+    result_file_name = "result_" + ckpt_name.split(".")[0] + ".txt"
+    with open(os.path.join(ckpt_dir, result_file_name), "w") as f:
+        f.write(summary_str)
+        f.write(repr(episode_returns))
+        f.write("\n\n")
+        f.write(repr(highest_rewards))
+    print(f"max entropy:{np.min(np.array(max_entropy_list))} min entropy:{np.max(np.array(min_entropy_list))}")
+    return success_rate, avg_return
+
+
 def reset_env(env, initial_state=None, remove_obj=False):
     # load the initial state
     if initial_state is not None:
@@ -1193,6 +1610,9 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--visualize_entropy", action="store_true", help="visualize trajectory entropy", default=False
+    )
+    parser.add_argument(
+        "--eval_speed", action="store_true", help="eval sped up policy", default=False
     )
     parser.add_argument(
         "--dim_feedforward",

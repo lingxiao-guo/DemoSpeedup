@@ -48,20 +48,42 @@ def put_text(img, text, is_waypoint=False, font_size=1, thickness=2, position="t
         )
     return img
 
+def bottom_20_percent_value(lst):
+    # 对列表进行排序
+    lst = list(lst)
+    sorted_lst = sorted(lst)
+    
+    # 计算前80%的位置索引
+    bottom_20_index = int(len(sorted_lst)*0.2) # 1: 80% 0.8 0.5 0.3
+    
+    # 检查元素是否在后20%的范围内
+    return sorted_lst[bottom_20_index]
+
 def plot_3d_trajectory(ax, traj_list, actions_var_norm=None, distance=None, label=None, gripper=None, legend=True, add=None):
     """Plot a 3D trajectory."""
     mark = None
     if actions_var_norm is not None:
         import math
-        actions_var_log = [math.log(var+1e-8) for var in actions_var_norm] # math.log(var+1e-8)
-        actions_var_log = np.array(actions_var_log)
+        # actions_var_log = [math.log(var+1e-8,1.5) for var in actions_var_norm] # math.log(var+1e-8)
+        # actions_var_log = np.array(actions_var_log)
+        actions_var_log = actions_var_norm
+        print(f"min log:{np.min(actions_var_log[:250])}|max log:{np.max(actions_var_log[:250])}")
+        # mark = (actions_var_log +14)/(14-2)
+        # for insertion:
+        # mark = (actions_var_log +20)/(18)
+        mark = np.array(actions_var_log)
+        # mark = np.exp(mark)/np.sum(np.exp(mark))
+        key = bottom_20_percent_value(mark[:220])
+        print(f"20% idx:{key}")
+        # mark = (actions_var_norm)/5
         # mark = (actions_var_log - np.mean(actions_var_log))/np.var(actions_var_log)
-        mark = np.clip(1-actions_var_norm, 0,1)
+        # mark = np.clip(1-actions_var_norm, 0,1)
     elif distance is not None:
         mark = [d*50 for d in distance]
 
     l = label
     num_frames = len(traj_list)
+    count = 0
     for i in range(num_frames):
         # change the color if the gripper state changes
         gripper_state_changed = (
@@ -86,7 +108,11 @@ def plot_3d_trajectory(ax, traj_list, actions_var_norm=None, distance=None, labe
                 c = mpl.cm.Blues(0.5+0.5*np.clip((0.5-mark[i]),0,1))
         else:
                 # c = mpl.cm.Greens(0.5 + 0.5 * i / num_frames)
-                c = mpl.cm.Reds(np.clip((0.5-0.8*mark[i]),0,1))
+                if mark[i] < 0.8 and i>20 and i<240:  # 0.4 for insertion, 0.3 for transfer
+                    c = mpl.cm.Blues(np.clip((1-mark[i]),0,1))
+                    count+=1
+                else:
+                    c = mpl.cm.Reds(np.clip((1-mark[i]),0,1))
 
         # change the marker if the gripper state changes
         if gripper_state_changed:
@@ -156,6 +182,7 @@ def plot_3d_trajectory(ax, traj_list, actions_var_norm=None, distance=None, labe
 
     if legend:
         ax.legend()
+    print("cautious rates:",count/250)
     # ax.w_xaxis.set_pane_color((173/255, 216/255, 230/255, 1.0))
     # ax.w_yaxis.set_pane_color((173/255, 216/255, 230/255, 1.0))
     # ax.w_zaxis.set_pane_color((173/255, 216/255, 230/255, 1.0))

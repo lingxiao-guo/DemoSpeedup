@@ -77,13 +77,13 @@ def main(args):
             for rollout_id in tqdm(range(num_rollouts)):
               dataset_path = os.path.join(args.dataset, f"episode_{rollout_id}.hdf5")
               with h5py.File(dataset_path, "r+") as root:
-                name = f"/max_entropy"
+                name = f"/max_var"
                 try:
                     root[name] = max_entropy
                 except:
                     del root[name]
                     root[name] = max_entropy
-                name = f"/min_entropy"
+                name = f"/min_var"
                 try:
                     root[name] = min_entropy
                 except:
@@ -357,7 +357,7 @@ def label_entropy(dataset, num_rollouts, config, ckpt_name, save_episode=True, s
                 if config["policy_class"] == "ACT":
                     if t % query_frequency == 0:
                         action_samples, action_entropy, _ = policy.get_entropy(qpos, curr_image)
-                        action_samples = action_samples.squeeze().permute(1,0,2) # (bs, num_samples, dim)
+                        action_samples = action_samples.squeeze().permute(1,0,2) # (timestep, num_samples, dim)
                         all_actions = torch.mean(action_samples, dim=1)
                         action_var = torch.var(action_samples, dim=1)
                         actions_entropy = torch.mean(torch.var(action_samples,dim=1))
@@ -388,20 +388,20 @@ def label_entropy(dataset, num_rollouts, config, ckpt_name, save_episode=True, s
                         raw_action = (actions_for_curr_step * exp_weights).sum(
                             dim=0, keepdim=True
                         )
-                        # action_var = (action_var_curr_step * exp_weights).sum(
-                        #     dim=0
-                        # )
+                        action_var = (action_var_curr_step * exp_weights).sum(
+                            dim=0
+                        )
                         # action_entropy = (action_entropy_curr_step * exp_weights).sum(
                         #     dim=0
                         # )
                         # action_entropy = torch.mean(torch.var(samples_for_curr_step.flatten(0,1),dim=0),dim=-1)
-                        action_var = torch.mean(torch.var(samples_for_curr_step.flatten(0,1),dim=0),dim=-1)
+                        # action_var = torch.mean(torch.var(samples_for_curr_step.flatten(0,1),dim=0),dim=-1)
                     else:
                         raw_action = all_actions[:, t % query_frequency]
 
                     # actions_var.append(torch.cat((torch.mean(left_actions_var,dim=-1,keepdim=True),torch.mean(right_actions_var,dim=-1,keepdim=True)),dim=-1))
                     actions_var.append(torch.mean(action_var, dim=-1))
-                    traj_action_entropy.append(action_entropy)
+                    traj_action_entropy.append(torch.mean(action_var, dim=-1)) # action_entropy
                 elif config["policy_class"] == "CNNMLP":
                     raw_action = policy(qpos, curr_image)
                 else:
