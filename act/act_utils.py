@@ -108,7 +108,7 @@ def plot_3d_trajectory(ax, traj_list, actions_var_norm=None, distance=None, labe
                 c = mpl.cm.Blues(0.5+0.5*np.clip((0.5-mark[i]),0,1))
         else:
                 # c = mpl.cm.Greens(0.5 + 0.5 * i / num_frames)
-                if mark[i] < 0.8 and i>20 and i<240:  # 0.4 for insertion, 0.3 for transfer
+                if mark[i] < 0.82 and i>20 and i<240:  # 0.4 for insertion, 0.3 for transfer
                     c = mpl.cm.Blues(np.clip((1-mark[i]),0,1))
                     count+=1
                 else:

@@ -3,7 +3,7 @@ import numpy as np
 import os
 os.environ['MUJOCO_GL'] = 'osmesa'
 os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
-os.environ["CUDA_VISIBLE_DEVICES"] = '2'
+os.environ["CUDA_VISIBLE_DEVICES"] = '3'
 import pickle
 import h5py
 import math
@@ -23,6 +23,7 @@ from act.detr.models.entropy_utils import KDE
 from act.visualize_episodes import save_videos
 from act.sim_env import BOX_POSE,make_sim_env
 import sys 
+from sklearn.cluster import KMeans
 sys.path.append("..") 
 from waypoint_extraction.extract_waypoints import optimize_waypoint_selection
 import IPython
@@ -1225,12 +1226,13 @@ def eval_speed_bc(config, ckpt_name, H_dict,save_episode=True):
         num_queries = policy_config["num_queries"]
 
     max_timesteps = int(max_timesteps * 1)  # may increase for real-world tasks
-    max_timesteps = max_timesteps//2
+    max_timesteps = max_timesteps //2
     num_rollouts = 50
     episode_returns = []
     highest_rewards = []
     max_entropy_list = []
     min_entropy_list = []
+    success_timesteps = 0
     for rollout_id in range(num_rollouts):
         rollout_id += 0
         ### set task
@@ -1320,7 +1322,7 @@ def eval_speed_bc(config, ckpt_name, H_dict,save_episode=True):
                             actions_for_curr_step = actions_for_curr_step[actions_populated]
     
                             all_time_samples[[t], t:t+ all_speed_actions.shape[1]] = action_samples[::3]
-                            actions_for_next_step = all_time_actions[:, t] # t+10
+                            actions_for_next_step = all_time_actions[:, t+5] # t+10
                             samples_populated = torch.all(
                                 actions_for_next_step != 0, axis=1
                             )
@@ -1336,24 +1338,16 @@ def eval_speed_bc(config, ckpt_name, H_dict,save_episode=True):
                             #     dim=0, keepdim=True
                             # )
                             entropy = (math.log(torch.mean(entropy)+1e-8,1.5))
-                            # entropy = torch.tensor(entropy).cuda()
-                            # For transfer 2x
-                            # entropy = torch.tensor((entropy+37)/32).cuda() # 20%： 0.8
+                            
                             # For insertion 2x
                             # entropy = torch.tensor((entropy+37)/34.5).cuda()  # 20%：0.7
                             # For transfer 3x
                             entropy = torch.tensor((entropy+37)/32).cuda() # 0.82
-                            # For insertion 3x
-                            # entropy = torch.tensor((entropy+37)/34.5).cuda()  # 20%：0.7
-                            weights = 5*torch.clip(0.2-entropy.squeeze(),0,0.2)  # weights: 80%: 0 20% 0~1
-                            # weights = 1 if weights >0 else 0
-                            weights = weights.cpu().numpy()
                             k = 0.01 
                            
                         if (t>20 and entropy <0.82) or policy_slow:
                             
                             policy_slow = True
-                            a=0 #_,actions_for_curr_step = KDE.kde_entropy(actions_for_curr_step.unsqueeze(0),k=13)
                             # slow policy
                             all_speed_actions = all_actions[:,::2]
                             all_time_actions[[t], t:t + all_speed_actions.shape[1]] = all_speed_actions
@@ -1362,37 +1356,34 @@ def eval_speed_bc(config, ckpt_name, H_dict,save_episode=True):
                                 actions_for_curr_step != 0, axis=1
                             )
                             actions_for_curr_step = actions_for_curr_step[actions_populated]
-    
+                            # cautious sampling
+                            # Try with another method: 1st, minimize entropy sampling to construct +/- samples
+                            # 2th, perform contrastive sampling in the +/- samples? 
+                            # But how to account for EMA, i.e. SMOOTH?
+                            
                             all_time_samples[[t], t:t+ all_speed_actions.shape[1]] = action_samples[::2]
-                            actions_for_next_step = all_time_actions[:, t] # t+10
+                            actions_for_next_step = all_time_actions[:, t+5] # t+10
                             samples_populated = torch.all(
                                 actions_for_next_step != 0, axis=1
                             )
                             samples_for_curr_step = all_time_samples[:, t]
                             samples_for_curr_step = samples_for_curr_step[samples_populated]
+                            # For insertion:
+                            # _,actions_for_curr_step = KDE.kde_entropy(actions_for_curr_step.unsqueeze(0),k=min(actions_for_curr_step.shape[0],13))
                             
                             entropy = torch.mean(torch.var(samples_for_curr_step.flatten(0,1),dim=0),dim=-1)
                             exp_weights = np.exp(-0.01 * np.arange(len(actions_for_curr_step)))
                             exp_weights = (
                                 torch.from_numpy(exp_weights).cuda().unsqueeze(dim=1)
                             )
-                            # entropy = (entropy_for_curr_step * exp_weights).sum(
-                            #     dim=0, keepdim=True
-                            # )
                             entropy = (math.log(torch.mean(entropy)+1e-8,1.5))
-                            # entropy = torch.tensor(entropy).cuda()
-                            # For transfer 2x
-                            # entropy = torch.tensor((entropy+37)/32).cuda() # 20%： 0.8
+
                             # For insertion 2x
                             # entropy = torch.tensor((entropy+37)/34.5).cuda()  # 20%：0.7
                             # For transfer 3x
                             entropy = torch.tensor((entropy+37)/32).cuda() # 0.8
-                            # For insertion 3x
-                            # entropy = torch.tensor((entropy+37)/34.5).cuda()  # 20%：0.7
-                            weights = 5*torch.clip(0.2-entropy.squeeze(),0,0.2)  # weights: 80%: 0 20% 0~1
-                            # weights = 1 if weights >0 else 0
-                            weights = weights.cpu().numpy()
                             k = 0.01 
+                            
                             # Change policy_slow flag if entropy is large
                             if entropy>0.82:
                                 policy_slow = False
@@ -1438,8 +1429,9 @@ def eval_speed_bc(config, ckpt_name, H_dict,save_episode=True):
                   
                     
                 if np.array(ts.reward) == env_max_reward:
-                    timestep_count -= 1
+                    # timestep_count -= 1
                     # print(t)
+                    success_timesteps += timestep_count
                     break
 
             plt.close()
@@ -1543,7 +1535,7 @@ def eval_speed_bc(config, ckpt_name, H_dict,save_episode=True):
 
     success_rate = np.mean(np.array(highest_rewards) == env_max_reward)
     avg_return = np.mean(episode_returns)
-    summary_str = f"\nSuccess rate: {success_rate}\nAverage return: {avg_return}\n\n"
+    summary_str = f"\nSuccess rate: {success_rate}\nAverage return: {avg_return}\nAverage consuming timesteps: {success_timesteps/(success_rate*len(episode_returns))}\n\n"
     for r in range(env_max_reward + 1):
         more_or_equal_r = (np.array(highest_rewards) >= r).sum()
         more_or_equal_r_rate = more_or_equal_r / num_rollouts
