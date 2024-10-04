@@ -85,7 +85,7 @@ class KDE():
         self.flag = kde_flag
         self.marginal_flag = marginal_flag
     
-    def kde_entropy(self,x,k=5):
+    def kde_entropy(self,x,k=1):
         """
         使用核密度估计计算样本的熵，并对批次进行并行计算。
 
@@ -101,7 +101,7 @@ class KDE():
         if self.flag:
             bandwidth = self.estimate_bandwidth(x[0])
             self.flag = False
-        bandwidth = 0.002 # 0.002 for insertion, 0.001 for transfer
+        bandwidth = 0.001 # 0.002 for insertion, 0.001 for transfer
         # 计算高斯核
         kernel_values = gaussian_kernel(x, bandwidth)  # (batch_size, num_samples, num_samples)
     

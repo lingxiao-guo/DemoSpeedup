@@ -1178,6 +1178,84 @@ def plot_trajectory_variance(config, ckpt_name, save_demos=False,save_episode=Tr
     
     return success_rate, avg_return
 
+def minimizing_entropy_sampling(query_sample, data, num_samples):
+    """
+    TODO: Change for a more exact way with minimizing entropy
+    从data中选择离query_sample最近的num_samples个样本。
+    
+    参数:
+    - query_sample: 形状为(D,)的张量，表示查询样本。
+    - data: 形状为(T, D)的张量，表示数据集。
+    - num_samples: 要选择的样本数量, 默认为25。
+    
+    返回:
+    - closest_samples: 形状为(num_samples, D)的张量，表示最近的样本。
+    """
+    if num_samples > data.size(0):
+        raise ValueError("Number of samples to select cannot be greater than the total number of samples")
+    query_sample = query_sample.float()
+    # 计算query_sample和data中每个样本之间的欧几里得距离
+    distances = torch.cdist(torch.unsqueeze(query_sample, 0), data)
+    
+    # 找到最近的num_samples个样本的索引
+    _, closest_indices = torch.topk(distances, k=num_samples, dim=1, largest=False)
+    
+    # 使用索引从data中选择最近的样本
+    closest_samples = torch.index_select(data, dim=0, index=closest_indices.squeeze(0))
+    
+    return closest_samples
+
+def test_time_chunk_adaptation(all_time_actions, all_time_samples, currentT,horizon):
+    """
+    # update action chunk: No change. No usage. The VAE is posteria-collapse
+    Usage: update all_time_actions from all_time_samples by constrainedly minimizing entropy
+    Return: updated all_time_actions
+    all_time_actions: (max_timesteps, max_timesteps + num_queries, state_dim)
+    all_time_samples: (max_timesteps, max_timesteps + num_queries, 10,state_dim)
+    horizon: chunk length; int
+    TODO: Re-implement codes for variable chunk length. Now only support constant horizon
+    """
+    all_time_actions_temp = all_time_actions.clone()
+    for t in range(currentT,currentT+horizon):
+        # TODO:This for-recurrence can be parallel on tensor
+        for i in range(all_time_samples.shape[-2]): 
+            # constrained update. The closer, the more smooth
+            all_time_actions_temp[[t-horizon],t-horizon:t] = \
+                        0.*all_time_actions[[t-horizon],t-horizon:t]+ \
+                        1.*all_time_samples[[t-horizon], t-horizon:t,i]    
+            entropy = []
+            old_entropy = []
+            # Calculate entropy; Needs to be calculate recurrently.
+            # Figure out a new metric that can be calculate parallelly
+            for j in range(currentT,t+1):
+                actions_for_curr_step_temp = all_time_actions_temp[:, j]
+                actions_populated = torch.all(
+                    actions_for_curr_step_temp != 0, axis=1
+                )
+                actions_for_curr_step_temp = actions_for_curr_step_temp[actions_populated]
+                e,_ = KDE.kde_entropy(actions_for_curr_step_temp.unsqueeze(0))
+                entropy.append(e)
+                actions_for_curr_step = all_time_actions[:, j]
+                actions_for_curr_step = actions_for_curr_step[actions_populated]
+                old_e,_ = KDE.kde_entropy(actions_for_curr_step.unsqueeze(0))
+                old_entropy.append(old_e)
+            entropy_mean = torch.stack(entropy,dim=0).mean(dim=0)
+            old_entropy_mean = torch.stack(old_entropy,dim=0).mean(dim=0)
+            # entropy monotonically decreasing:
+            if entropy_mean < old_entropy_mean:
+                all_time_actions[[t-horizon],t-horizon:t] =  all_time_actions_temp[[t-horizon],t-horizon:t]   
+    
+    return all_time_actions
+
+
+def get_constraint_samples(current_action_chunks,samples, err_threshold):
+    """
+    Return samples that are close to current action chunks
+    But it seems that this needs to be solve recurrently?
+    """
+    distance = samples-current_action_chunks
+
+
 def eval_speed_bc(config, ckpt_name, H_dict,save_episode=True):
     set_seed(0)
     ckpt_dir = config["ckpt_dir"]
@@ -1220,7 +1298,7 @@ def eval_speed_bc(config, ckpt_name, H_dict,save_episode=True):
         env_max_reward = env.task.max_reward
 
     query_frequency = policy_config["num_queries"]
-    query_frequency = 50//4
+    query_frequency = 50//2
     if temporal_agg:
         query_frequency = 1
         num_queries = policy_config["num_queries"]
@@ -1313,15 +1391,19 @@ def eval_speed_bc(config, ckpt_name, H_dict,save_episode=True):
                     if temporal_agg:
                         if not policy_slow:
                             # all_time_actions[[t], t : t + num_queries] = all_actions
-                            all_speed_actions = all_actions[:,::3]
+                            # (1, num_samples, timestep * dim)
+                            # actions_reshape = action_samples.permute(1,0,2).flatten(1).unsqueeze(0)
+                            # _ ,all_actions = KDE.kde_entropy(actions_reshape,k=1)
+                            # all_actions = all_actions.reshape(1,action_samples.shape[0],action_samples.shape[-1])
+                            all_speed_actions = all_actions[:,::2]
                             all_time_actions[[t], t:t + all_speed_actions.shape[1]] = all_speed_actions
+                            all_time_samples[[t], t:t+ all_speed_actions.shape[1]] = action_samples[::2]
+                           
                             actions_for_curr_step = all_time_actions[:, t]
                             actions_populated = torch.all(
                                 actions_for_curr_step != 0, axis=1
                             )
                             actions_for_curr_step = actions_for_curr_step[actions_populated]
-    
-                            all_time_samples[[t], t:t+ all_speed_actions.shape[1]] = action_samples[::3]
                             actions_for_next_step = all_time_actions[:, t+5] # t+10
                             samples_populated = torch.all(
                                 actions_for_next_step != 0, axis=1
@@ -1331,21 +1413,26 @@ def eval_speed_bc(config, ckpt_name, H_dict,save_episode=True):
                             
                             entropy = torch.mean(torch.var(samples_for_curr_step.flatten(0,1),dim=0),dim=-1)
                             exp_weights = np.exp(-0.01 * np.arange(len(actions_for_curr_step)))
+                            exp_weights = exp_weights / exp_weights.sum()
                             exp_weights = (
                                 torch.from_numpy(exp_weights).cuda().unsqueeze(dim=1)
                             )
-                            # entropy = (entropy_for_curr_step * exp_weights).sum(
-                            #     dim=0, keepdim=True
-                            # )
+                            
                             entropy = (math.log(torch.mean(entropy)+1e-8,1.5))
                             
                             # For insertion 2x
-                            # entropy = torch.tensor((entropy+37)/34.5).cuda()  # 20%：0.7
+                            entropy = torch.tensor((entropy+37)/34.5).cuda()  # 20%：0.75
                             # For transfer 3x
-                            entropy = torch.tensor((entropy+37)/32).cuda() # 0.82
+                            # entropy = torch.tensor((entropy+37)/32).cuda() # 0.82
                             k = 0.01 
+                            query_action = (actions_for_curr_step * exp_weights).sum(
+                            dim=0, keepdim=True
+                            )                            
+                            if t>20 : # and entropy <0.75:
+                                actions_for_curr_step = minimizing_entropy_sampling(query_action.squeeze(),actions_for_curr_step.squeeze(),num_samples=13)
+
                            
-                        if (t>20 and entropy <0.82) or policy_slow:
+                        if False: #(t>20 and entropy <0.75) or policy_slow:
                             
                             policy_slow = True
                             # slow policy
@@ -1356,10 +1443,6 @@ def eval_speed_bc(config, ckpt_name, H_dict,save_episode=True):
                                 actions_for_curr_step != 0, axis=1
                             )
                             actions_for_curr_step = actions_for_curr_step[actions_populated]
-                            # cautious sampling
-                            # Try with another method: 1st, minimize entropy sampling to construct +/- samples
-                            # 2th, perform contrastive sampling in the +/- samples? 
-                            # But how to account for EMA, i.e. SMOOTH?
                             
                             all_time_samples[[t], t:t+ all_speed_actions.shape[1]] = action_samples[::2]
                             actions_for_next_step = all_time_actions[:, t+5] # t+10
@@ -1368,8 +1451,8 @@ def eval_speed_bc(config, ckpt_name, H_dict,save_episode=True):
                             )
                             samples_for_curr_step = all_time_samples[:, t]
                             samples_for_curr_step = samples_for_curr_step[samples_populated]
-                            # For insertion:
-                            # _,actions_for_curr_step = KDE.kde_entropy(actions_for_curr_step.unsqueeze(0),k=min(actions_for_curr_step.shape[0],13))
+                           
+                            _,actions_for_curr_step = KDE.kde_entropy(actions_for_curr_step.unsqueeze(0),k=min(actions_for_curr_step.shape[0],13))
                             
                             entropy = torch.mean(torch.var(samples_for_curr_step.flatten(0,1),dim=0),dim=-1)
                             exp_weights = np.exp(-0.01 * np.arange(len(actions_for_curr_step)))
@@ -1379,13 +1462,13 @@ def eval_speed_bc(config, ckpt_name, H_dict,save_episode=True):
                             entropy = (math.log(torch.mean(entropy)+1e-8,1.5))
 
                             # For insertion 2x
-                            # entropy = torch.tensor((entropy+37)/34.5).cuda()  # 20%：0.7
+                            entropy = torch.tensor((entropy+37)/34.5).cuda()  # 20%：0.7
                             # For transfer 3x
-                            entropy = torch.tensor((entropy+37)/32).cuda() # 0.8
+                            # entropy = torch.tensor((entropy+37)/32).cuda() # 0.8
                             k = 0.01 
                             
                             # Change policy_slow flag if entropy is large
-                            if entropy>0.82:
+                            if entropy>0.75:
                                 policy_slow = False
                         
                         # k = 0.01 
@@ -1397,6 +1480,7 @@ def eval_speed_bc(config, ckpt_name, H_dict,save_episode=True):
                         raw_action = (actions_for_curr_step * exp_weights).sum(
                             dim=0, keepdim=True
                         )
+                        raw_action = 0.8*query_action + 0.2*raw_action
                         traj_action_entropy.append(entropy.squeeze())
                             
                     else:
