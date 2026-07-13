@@ -1,8 +1,11 @@
 import os
+import sys
 import numpy as np
 import cv2
 import h5py
 import argparse
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import matplotlib.pyplot as plt
 from act.constants import DT

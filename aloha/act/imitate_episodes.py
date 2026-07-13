@@ -329,7 +329,8 @@ def label_entropy(config, ckpt_name, save_demos=False,save_episode=True):
 
         qpos = all_qpos  # ts, dim
         
-        if save_episode : 
+        if save_episode :
+            os.makedirs(os.path.join(ckpt_dir, "label"), exist_ok=True)
             save_videos(
                 image_list,
                 DT,
